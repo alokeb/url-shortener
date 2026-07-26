@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>URL Shortener Tester</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
+  form { display: flex; gap: 0.5rem; }
+  input[type=text] { flex: 1; padding: 0.5rem; }
+  button { padding: 0.5rem 1rem; }
+  ul { list-style: none; padding: 0; margin-top: 1.5rem; }
+  li { padding: 0.5rem 0; border-bottom: 1px solid #ddd; }
+  .short-url { font-weight: bold; }
+  .error { color: #b00020; }
+</style>
+</head>
+<body>
+  <h1>URL Shortener Tester</h1>
+  <form id="shorten-form">
+    <input type="text" id="url-input" placeholder="https://example.com/some/path" required>
+    <button type="submit">Shorten</button>
+  </form>
+  <ul id="results"></ul>
+
+  <script>
+    const form = document.getElementById('shorten-form');
+    const input = document.getElementById('url-input');
+    const results = document.getElementById('results');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const url = input.value.trim();
+      if (!url) return;
+
+      const li = document.createElement('li');
+      li.textContent = 'Shortening...';
+      results.prepend(li);
+
+      try {
+        const res = await fetch('/api/urls', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
+        });
+
+        if (!res.ok) {
+          const body = await res.text();
+          li.innerHTML = `<span class="error">Failed (${res.status}): ${body}</span>`;
+          return;
+        }
+
+        const data = await res.json();
+        li.innerHTML = `${url} &rarr; <a class="short-url" href="${data.shortUrl}" target="_blank">${data.shortUrl}</a>`;
+      } catch (err) {
+        li.innerHTML = `<span class="error">Error: ${err.message}</span>`;
+      }
+
+      input.value = '';
+    });
+  </script>
+</body>
+</html>

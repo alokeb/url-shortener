@@ -1,0 +1,86 @@
+# Docker Compose: one file describing multiple containers ("services" below) plus how they
+# network together and what data they persist, all started/stopped together as a unit with
+# `docker compose up` / `docker compose down`. Not a Kubernetes file and Kubernetes doesn't
+# read it - it's a local-development-only tool for exactly this kind of multi-container app.
+services:
+  # This is the Spring Boot app itself, built fresh from ./Dockerfile every time (`build: .`)
+  # rather than pulled from a registry like the other two services below.
+  app:
+    build: .
+    # host_port:container_port - makes the app reachable at localhost:8080 on your machine.
+    ports:
+      - "8080:8080"
+    # These become real environment variables INSIDE the app container, which is exactly
+    # what application.properties' ${DB_HOST:localhost} syntax reads at startup. Note
+    # DB_HOST here is "postgres" - not "localhost" - because from inside this container,
+    # "postgres" is the OTHER container's service name, resolved via Docker's built-in DNS
+    # for anything on the same network. ${DB_NAME} etc. (no default) pull their actual
+    # values from the .env file sitting next to this one (git-ignored - see .env.example).
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    # Only controls START ORDER (postgres/redis's containers get created first) - NOT
+    # "wait until postgres is actually ready to accept connections". Those are different
+    # things; a real production setup would add health checks for the latter.
+    depends_on:
+      - postgres
+      - redis
+    # Attached to both networks below: "public" so it's reachable from outside (via the
+    # ports: mapping above), and "internal" so it can actually reach postgres/redis, which
+    # deliberately aren't on "public" at all.
+    networks:
+      - public
+      - internal
+
+  postgres:
+    # No `build:` here - pulls the official prebuilt postgres:16 image straight from Docker
+    # Hub instead, unlike `app` above.
+    image: postgres:16
+    # postgres's own official image reads these three specific variable names at first
+    # startup to create the initial database/user/password - that's Postgres's own
+    # convention, not a Spring or Docker Compose thing.
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    # THIS is what makes data survive `docker compose down`/`up` or even a full container
+    # recreation: postgres-data (declared under the top-level `volumes:` key below) is a
+    # named volume Docker manages outside any single container's lifecycle. Without this,
+    # every restart would start from a completely empty database - exactly what the
+    # Testcontainers-based tests actually rely on instead (see UrlShortenerServiceStressTest).
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    # Bound specifically to 127.0.0.1 (not just "5432:5432", which would bind 0.0.0.0 - every
+    # network interface) so this is reachable from tools on THIS machine only (e.g. a
+    # database-browsing VS Code extension), never from another machine on the network.
+    ports:
+      - "127.0.0.1:5432:5432"
+    # Deliberately NOT on the "public" network - nothing outside this compose stack can
+    # reach postgres through Docker's own networking, regardless of the ports: line above.
+    networks:
+      - internal
+
+  redis:
+    image: redis:7
+    ports:
+      - "127.0.0.1:6379:6379"
+    networks:
+      - internal
+
+# Both networks are plain Docker bridge networks; nothing here needs custom configuration
+# beyond just existing, so both are empty. Their names alone are what `networks:` on each
+# service above refers to.
+networks:
+  public:
+  internal:
+
+# Declaring postgres-data here (with no config, same as the networks above) is what makes it
+# a real, durable, Docker-managed volume rather than data trapped inside one container's
+# writable layer, which gets destroyed along with the container.
+volumes:
+  postgres-data:
