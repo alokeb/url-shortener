@@ -1,0 +1,28 @@
+@baseUrl = http://localhost:8080
+
+### Shorten a URL
+# @name shorten1
+POST {{baseUrl}}/api/urls
+Content-Type: application/json
+
+{
+  "url": "https://www.anthropic.com"
+}
+
+### Follow the redirect (reuses the shortCode from the response above)
+GET {{baseUrl}}/{{shorten1.response.body.$.shortCode}}
+
+### Shorten another URL
+# @name shorten2
+POST {{baseUrl}}/api/urls
+Content-Type: application/json
+
+{
+  "url": "https://spring.io"
+}
+
+### Follow that redirect
+GET {{baseUrl}}/{{shorten2.response.body.$.shortCode}}
+
+### Unknown short code (expect 404)
+GET {{baseUrl}}/doesnotexist
