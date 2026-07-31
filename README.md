@@ -2,13 +2,17 @@
 
 A URL shortening service, built to learn Spring Boot — and just as much to learn how to work effectively with an AI coding agent ("vibe coding") on a real, evolving project rather than a toy prompt. Given a long URL, it generates a short code (or reuses the one it already gave that URL — shortened URLs are permalinks) and redirects to the original URL when that code is visited.
 
+What started as a local Docker Compose app has grown into a full Kubernetes deployment with autoscaling and a Prometheus/Grafana monitoring stack, deployable either locally (minikube) or to a small AWS instance — all through Terraform.
+
 ## Stack
 
-- Java 21
-- Spring Boot 4.1.0 (Web MVC, Spring Data JPA, Validation, Cache)
+- Java 21, Spring Boot 4.1.0 (Web MVC, Spring Data JPA, Validation, Cache, Actuator)
 - PostgreSQL — persistent storage, the source of truth
 - Redis — caches short-code lookups so repeated redirects don't hit Postgres every time
-- Docker / Docker Compose — build, run, and orchestrate all of the above
+- Docker / Docker Compose — local build/run/orchestration
+- Kubernetes — Deployments, Services, a HorizontalPodAutoscaler, all in `k8s/`
+- Helm — installs the monitoring stack (Prometheus + Grafana + Alertmanager)
+- Terraform — one-command deploy of everything above, to either a local minikube cluster or an AWS EC2 instance running k3s
 - Testcontainers — spins up real, throwaway Postgres/Redis containers for the test suite
 
 ## Project layout
@@ -26,35 +30,137 @@ src/main/java/com/alokeb/urlshortener/
     └── ShortenResponse.java          # POST response body
 
 src/main/resources/
-├── application.properties   # env-var-driven Postgres/Redis config, no baked-in secrets
+├── application.properties   # env-var-driven Postgres/Redis config, /actuator/prometheus
 └── static/tester.html       # simple browser form to shorten/test URLs
 
 src/test/java/com/alokeb/urlshortener/
 ├── UrlShortenerApplicationTests.java      # plain context-load smoke test
 └── service/UrlShortenerServiceStressTest.java  # see Testing below
 
-Dockerfile          # multi-stage build (Maven -> slim JRE runtime)
-docker-compose.yml  # app + postgres + redis, wired together with a public/internal
-                     # network split - only `app` is meant to be reachable externally
-.env.example         # copy to .env and fill in real values (.env is git-ignored)
-requests.http         # REST Client (VS Code) requests for shorten + redirect
-test-requests.sh       # zero-dependency curl script exercising the same flow
+Dockerfile           # multi-stage build (Maven -> slim JRE runtime)
+docker-compose.yml   # app + postgres + redis, local dev only (see below)
+.env.example          # copy to .env and fill in real values (.env is git-ignored)
+requests.http          # REST Client (VS Code) requests for shorten + redirect
+test-requests.sh        # zero-dependency curl script exercising the same flow
+
+k8s/                 # plain kubectl manifests - namespace, Secret, Postgres, Redis, app,
+│                     # HPA, ServiceMonitor, and a load-test Job for exercising autoscaling
+└── ...
+
+terraform/            # deploys everything in k8s/ (plus the Helm monitoring stack) with
+│                      # one command, to either local minikube or AWS - see "Deploying" below
+├── credentials.tfvars.example   # copy to credentials.auto.tfvars, fill in AWS keys
+├── terraform.tfvars.example     # copy to terraform.tfvars to override any default
+└── ...
 ```
 
-## Running
+## Prerequisites
 
-No local JDK/Maven needed — everything runs through Docker.
+Every tool below is cross-platform (Linux/macOS/Windows) — install whichever your OS's package manager or the linked installer prefers. You only need the ones for the path you're actually using (see the table under "Deploying").
+
+| Tool | Get it |
+|---|---|
+| Docker | https://docs.docker.com/get-docker/ |
+| kubectl | https://kubernetes.io/docs/tasks/tools/#kubectl |
+| minikube | https://minikube.sigs.k8s.io/docs/start/ |
+| Helm | https://helm.sh/docs/intro/install/ |
+| Terraform | https://developer.hashicorp.com/terraform/install |
+| conntrack (Linux only, needed by minikube's Docker driver) | usually available via your Linux distro's own package manager (e.g. `conntrack` on Debian/Ubuntu, `conntrack-tools` on Fedora/Arch) |
+
+No local JDK or Maven needed for any path — the app is always built inside Docker.
+
+## Deploying
+
+Three ways to run this, from simplest to most complete:
+
+| Path | What you get | Needs |
+|---|---|---|
+| **Docker Compose** | app + Postgres + Redis, no Kubernetes | Docker |
+| **Local Kubernetes** | + autoscaling, monitoring dashboard | + kubectl, minikube, Helm (or Terraform to automate it) |
+| **AWS** (example cloud target) | same as local K8s, but on a real internet-reachable server | + Terraform, an AWS account |
+
+### Option 1: Docker Compose (simplest)
 
 ```bash
 cp .env.example .env   # first time only; edit in a real password
 docker compose up -d --build
 ```
 
-This builds the app image and starts three containers: `app` (port `8080`, the only one meant to be publicly reachable), `postgres` (named volume, so data survives restarts/recreation), and `redis`. Postgres and Redis also each publish to `127.0.0.1` only (not `0.0.0.0`) — reachable from local tooling on this machine (a database-browsing VS Code extension, `psql`, `redis-cli`), never from another machine on the network.
+Starts three containers: `app` (port `8080`), `postgres`, `redis`. Postgres/Redis also publish to `127.0.0.1` only (reachable from local tooling on this machine, never from the network).
 
-To stop everything: `docker compose down` (add `-v` only if you actually want to wipe the Postgres volume too).
+**Teardown:** `docker compose down` (add `-v` to also wipe the Postgres volume).
 
-If you change a service's config without touching its image (e.g. after removing a `docker-compose.yml` setting), a plain `docker compose up -d` may only *restart* affected containers rather than recreate them — which can leave stale network state behind. If something's misbehaving after a compose-file edit and a restart doesn't fix it, try `docker compose up -d --force-recreate`.
+If something's misbehaving after editing `docker-compose.yml` and a restart doesn't fix it, try `docker compose up -d --force-recreate` — a plain restart can leave stale network state behind when config changed but the image didn't.
+
+### Option 2: Local Kubernetes (minikube)
+
+Either apply the plain manifests by hand, or let Terraform do the whole thing (cluster included):
+
+**By hand:**
+```bash
+minikube start --driver=docker --memory=20000
+minikube addons enable metrics-server
+docker build -t url-shortener-app:latest .
+minikube image load url-shortener-app:latest
+kubectl apply -f k8s/namespace.yaml -f k8s/secret.yaml -f k8s/postgres.yaml \
+  -f k8s/redis.yaml -f k8s/app.yaml -f k8s/hpa.yaml -f k8s/servicemonitor.yaml
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+helm install monitoring prometheus-community/kube-prometheus-stack \
+  -n monitoring --create-namespace
+```
+
+**Or via Terraform** (see "Terraform" below for the full explanation) — from `terraform/`:
+```bash
+terraform init
+terraform apply -target=null_resource.minikube_cluster -auto-approve   # phase 1: cluster only
+terraform apply -auto-approve                                          # phase 2: everything else
+```
+
+**Teardown:**
+```bash
+kubectl delete namespace url-shortener monitoring   # if deployed by hand
+# or, if deployed via terraform:
+terraform destroy -auto-approve
+minikube stop     # or `minikube delete` to remove the cluster entirely
+```
+
+### Option 3: AWS (example cloud target)
+
+Everything in `k8s/` (Postgres, Redis, the app, the HPA, monitoring) only ever talks to "a Kubernetes cluster" — it has no idea whether that cluster is minikube or a cloud VM. AWS is provided as the one concrete, tested-locally reference implementation of "provision a cloud cluster for this," via `terraform/aws.tf`: it provisions a single EC2 instance running [k3s](https://k3s.io/) (a lightweight, fully real Kubernetes distribution), then deploys the same app/Postgres/Redis/HPA into it. Adding another cloud provider later is a matter of writing one more file following that same shape (VM + firewall + SSH keypair + k3s install script + kubeconfig fetch) — see `aws.tf`'s own comments for the pattern.
+
+**Minimum system requirements** (this instance, or any machine running this stack): ~1 vCPU / ~1GB RAM without monitoring, ~2 vCPU / ~3GB RAM with it enabled. `aws_instance_type` (`terraform/variables.tf`) defaults to `t3.micro`, which meets the smaller tier and happens to also be AWS's free-tier-eligible size — a bonus, not the reason it was chosen. Any instance type meeting the requirement above works. **Note:** AWS's managed Kubernetes service (EKS) has no free tier at all (a flat ~$73/month for the control plane alone regardless of usage) — this deliberately runs k3s on a plain EC2 instance instead, specifically to avoid that. A card on file is still required by AWS even for free-tier usage, and leaving resources running past whatever limits apply to your account, or forgetting to tear down, will incur real charges.
+
+**This path is written carefully but has not been live-tested against a real AWS account** (no credentials were available to verify it end-to-end while building it) — unlike the local minikube path, which was fully applied and destroyed successfully. Run `terraform plan` first (read-only, safe, costs nothing) to review what it would do before your first real `apply`, and keep an eye on the AWS Console while it runs the first time.
+
+```bash
+cd terraform
+cp credentials.tfvars.example credentials.auto.tfvars   # fill in real AWS keys
+cp terraform.tfvars.example terraform.tfvars             # uncomment deployment_target = "aws"
+
+terraform init
+terraform apply -target=null_resource.aws_kubeconfig -auto-approve   # phase 1: provision EC2 + k3s
+terraform apply -auto-approve                                        # phase 2: everything else
+```
+
+`enable_monitoring` defaults to `true`, which needs the larger (~2 vCPU/~3GB) tier above — set `enable_monitoring = false` in `terraform.tfvars` if you're using an instance sized only to the smaller (~1 vCPU/~1GB) minimum, like the default `t3.micro`.
+
+**Teardown:** `terraform destroy -auto-approve` — this deletes the EC2 instance and everything on it. Always run this when you're done to avoid ongoing charges.
+
+### Terraform: why two `apply` commands?
+
+Terraform's provider configuration (the `kubernetes`/`helm`/`kubectl` blocks) has to be resolved *before* Terraform knows what resources exist — so it can't wait for a not-yet-created cluster the way individual resources can wait on each other. The first `apply` (targeted at just the cluster-bootstrap resource) exists purely to get a live cluster and valid kubeconfig in place; the second `apply` does everything else now that the provider blocks can actually connect. This is a real, documented Terraform limitation, not a workaround for a mistake in this config.
+
+After that first cluster exists, subsequent `terraform apply` runs (e.g. after a code change) only need the single, normal command — the two-phase dance is only needed when the cluster itself doesn't exist yet.
+
+### Accessing things once deployed (either Kubernetes path)
+
+```bash
+kubectl port-forward -n url-shortener svc/url-shortener-app 8080:8080   # app: http://localhost:8080
+kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80       # Grafana: http://localhost:3000 (auto-logged in as admin)
+```
+
+For the AWS path, run `export KUBECONFIG=terraform/generated/aws-kubeconfig` first so `kubectl` points at the right cluster (`terraform output` prints this reminder too).
 
 ## API
 
@@ -111,6 +217,19 @@ docker run --rm \
 
 **`UrlShortenerApplicationTests`** is the original bare context-load smoke test generated by Spring Initializr. It needs a live Postgres/Redis to pass and currently has no Testcontainers setup of its own, so it isn't run as part of any normal workflow here — `mvn test` with no `-Dtest` filter would try to run it too and fail without one.
 
+## Autoscaling
+
+The HPA (`k8s/hpa.yaml`) scales the app Deployment on CPU utilization. `k8s/load-test-job.yaml` generates real HTTP load (a mix of unique-URL writes and repeated cache-hit reads, run as parallel in-cluster Job Pods) to actually trigger it:
+
+```bash
+kubectl apply -f k8s/load-test-job.yaml
+kubectl get hpa -n url-shortener -w   # watch REPLICAS climb in real time
+```
+
+Delete the Job (`kubectl delete job load-test -n url-shortener`) to stop the load; the HPA scales back down on its own after a few minutes (a deliberate stabilization delay, to avoid flapping on brief spikes).
+
 ## Roadmap
 
-- Deploy to Kubernetes as an auto-scalable cluster
+- Ingress, so the app doesn't need `kubectl port-forward` to reach it
+- A custom Grafana dashboard for this app specifically (replica count, request rate, cache hit ratio in one place), rather than ad-hoc PromQL queries against the bundled dashboards
+- Additional Terraform cloud targets beyond AWS (the K8s-facing resources are already cloud-agnostic — see `terraform/aws.tf`'s comments for the pattern to follow)
