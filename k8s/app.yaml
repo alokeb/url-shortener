@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: url-shortener-app
+  namespace: url-shortener
+spec:
+  # Just the starting point - the whole point of the HPA (hpa.yaml) is that it edits this
+  # number for us based on real load, scaling it up and back down between minReplicas and
+  # maxReplicas. Setting it here is only what the Deployment starts at / falls back to if the
+  # HPA were ever removed.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: url-shortener-app
+  template:
+    metadata:
+      labels:
+        app: url-shortener-app
+    spec:
+      # initContainers run to completion, in order, before any container in `containers:`
+      # below is even created - unlike docker-compose.yml's depends_on (which only sequences
+      # container *starts*, not readiness; see its comments), this actually blocks until
+      # Postgres is accepting connections. Needed because plain Kubernetes Deployments have
+      # no built-in ordering AT ALL between separate Deployments - without this, the app
+      # crash-loops on every fresh rollout if Postgres's Pod happens to still be starting
+      # (confirmed: this happened on first apply here). busybox is used purely for its `nc`
+      # (netcat) binary - small image, nothing else needed for a plain "is the port open" check.
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - until nc -z postgres 5432; do echo "waiting for postgres..."; sleep 2; done
+      containers:
+        - name: app
+          image: url-shortener-app:latest
+          # This image only exists inside minikube because we `minikube image load`-ed it
+          # there by hand (see CLAUDE.md) - there's no registry to pull it from. Never stops
+          # Kubernetes from ever trying to pull, which would otherwise fail outright.
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DB_HOST
+              value: postgres
+            - name: DB_PORT
+              value: "5432"
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: url-shortener-db
+                  key: DB_NAME
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: url-shortener-db
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: url-shortener-db
+                  key: DB_PASSWORD
+          # requests is the number the HPA (hpa.yaml) actually does its percentage math
+          # against - e.g. "50% CPU utilization" means 50% of this request, not 50% of a
+          # whole CPU core. Sized for the host-stress-test phase: this app's memory use is
+          # mostly fixed JVM overhead per Pod (~300-400Mi observed at rest, not much driven
+          # by request volume), so pushing real host-level memory usage up mainly means
+          # scaling Pod *count* high via maxReplicas, not raising per-Pod usage - this
+          # request is set close to that real baseline so scaling reflects genuine
+          # consumption rather than an artificially tight number forcing scale-out on its
+          # own. limits caps each Pod's headroom to absorb a spike before the HPA reacts.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 300Mi
+            limits:
+              cpu: 800m
+              memory: 512Mi
+          # Reuses the /actuator/health endpoint we just wired up for Prometheus's sibling,
+          # /actuator/prometheus. livenessProbe: "is this Pod wedged? if it keeps failing,
+          # restart the container." readinessProbe: "is this Pod ready for traffic right
+          # now?" - failing this doesn't restart anything, it just pulls the Pod out of the
+          # Service's routing rotation until it passes again (e.g. during slow JVM startup).
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+---
+# The Service needs its own metadata.labels, distinct from spec.selector above (which is how
+# *this* Service finds its Pods). servicemonitor.yaml's selector.matchLabels looks for that
+# label on the Service object itself, not the Pods - without it there was nothing for the
+# ServiceMonitor to match, and Prometheus silently had no target for the app at all.
+apiVersion: v1
+kind: Service
+metadata:
+  name: url-shortener-app
+  namespace: url-shortener
+  labels:
+    app: url-shortener-app
+spec:
+  selector:
+    app: url-shortener-app
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
