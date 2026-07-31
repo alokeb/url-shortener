@@ -1,0 +1,24 @@
+# ServiceMonitor: a Prometheus Operator CRD (installed by the kube-prometheus-stack Helm
+# chart) that tells Prometheus "scrape this Service's /actuator/prometheus endpoint on a
+# schedule." Without this, the app's endpoint just sits there unread - Actuator/Micrometer
+# only make the data available, something still has to go fetch it.
+#
+# The `release: monitoring` label isn't decorative - the chart's Prometheus instance is
+# configured with `serviceMonitorSelector: {matchLabels: {release: monitoring}}` (checked via
+# `kubectl get prometheus -n monitoring -o jsonpath=...`), so a ServiceMonitor without this
+# exact label is silently ignored, not an error.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: url-shortener-app
+  namespace: url-shortener
+  labels:
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: url-shortener-app
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 15s
