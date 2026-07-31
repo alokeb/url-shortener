@@ -1,0 +1,43 @@
+# No PVC here, deliberately - Redis is purely a cache in this project (see CLAUDE.md's
+# project goal: hot short-code lookups only), never the source of truth. Losing its contents
+# on a restart just means the next few lookups are cache misses that fall through to
+# Postgres - not data loss, unlike postgres.yaml's PVC.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: url-shortener
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: url-shortener
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
