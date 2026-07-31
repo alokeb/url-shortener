@@ -50,6 +50,27 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>
 		</dependency>
+		<!-- Actuator exposes operational endpoints (health, metrics, etc.) that Spring Boot
+		     wires up automatically from stuff already on the classpath - it doesn't collect
+		     anything itself. Micrometer (below) is the library that actually gathers the
+		     metrics (JVM heap, HTTP request timings, Hibernate/JDBC stats, cache hit/miss
+		     counts from the @Cacheable Redis lookups); Actuator just gives Micrometer's data
+		     an HTTP endpoint to be read from. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+		<!-- Micrometer is a metrics-facade, like SLF4J but for numbers instead of log lines -
+		     the app code and Spring's auto-instrumentation never talk to Prometheus directly,
+		     they record through Micrometer's generic API. This dependency is what plugs a
+		     Prometheus-shaped "writer" into that facade, which is what makes Actuator serve
+		     a /actuator/prometheus endpoint in the exact text format Prometheus's scraper
+		     expects (Actuator alone only gives you a generic, non-Prometheus /actuator/metrics
+		     endpoint). -->
+		<dependency>
+			<groupId>io.micrometer</groupId>
+			<artifactId>micrometer-registry-prometheus</artifactId>
+		</dependency>
 
 		<dependency>
 			<groupId>org.postgresql</groupId>
