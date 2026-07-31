@@ -1,6 +1,22 @@
 # url-shortener
 
-A URL shortening service, built to learn Spring Boot — and just as much to learn how to work effectively with an AI coding agent ("vibe coding") on a real, evolving project rather than a toy prompt. Given a long URL, it generates a short code (or reuses the one it already gave that URL — shortened URLs are permalinks) and redirects to the original URL when that code is visited.
+[![License: MIT](https://img.shields.io/github/license/alokeb/url-shortener)](LICENSE)
+![Java](https://img.shields.io/badge/Java-21-orange)
+![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.0-brightgreen)
+![Kubernetes](https://img.shields.io/badge/Kubernetes-ready-326CE5?logo=kubernetes&logoColor=white)
+![Terraform](https://img.shields.io/badge/Terraform-IaC-844FBA?logo=terraform&logoColor=white)
+
+A URL shortening service — and, more importantly, a real example of what "vibe coding" (building real software by working with an AI coding agent) actually looks like past the first five minutes.
+
+Most AI-pair-programming demos stop at a toy CRUD app. This one didn't: it started the same way — a Spring Boot service, Postgres, Redis — and then kept going the way a real project does. Containerizing it. Deploying it to Kubernetes. Wiring up autoscaling and a Prometheus/Grafana monitoring stack. Actually stress-testing it. Automating the whole deployment with Terraform. Every step — including the mistakes (a race condition that crash-looped a pod, a monitoring config that was silently ignored, a memory limit that turned out to be too small) — is in the commit history and in [`CLAUDE.md`](CLAUDE.md), not cleaned up after the fact.
+
+If you're newer to coding and curious what working with an AI agent on something real actually involves — not a one-shot snippet, but an evolving codebase with real infrastructure decisions — this repo is meant to be read, not just run. Clone it, open the commit history, see how one small project grew.
+
+⭐ If this is useful to you as a learning example, a star helps other people find it too.
+
+## What it does
+
+Given a long URL, it generates a short code (or reuses the one it already gave that URL — shortened URLs are permalinks) and redirects to the original URL when that code is visited.
 
 What started as a local Docker Compose app has grown into a full Kubernetes deployment with autoscaling and a Prometheus/Grafana monitoring stack, deployable either locally (minikube) or to a small AWS instance — all through Terraform.
 
