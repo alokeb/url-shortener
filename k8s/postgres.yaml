@@ -1,0 +1,94 @@
+# PersistentVolumeClaim: the Kubernetes equivalent of docker-compose.yml's top-level
+# `volumes: postgres-data:` - a request for durable storage that outlives any single Pod.
+# minikube's default StorageClass auto-provisions the actual backing volume (a hostPath
+# directory inside the minikube node container) the moment this PVC is created; a real cloud
+# cluster would provision an actual network-attached disk (EBS, PD, etc.) the same way.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: url-shortener
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+# Deployment, not StatefulSet: a single Postgres replica reading/writing one PVC doesn't need
+# StatefulSet's stable network identity or ordered scaling - those matter for multi-replica
+# stateful systems (e.g. a Postgres cluster with replicas), not this. strategy: Recreate
+# matters more here than the Deployment-vs-StatefulSet choice: the default RollingUpdate
+# strategy would try to start the new Pod before killing the old one, and both can't mount
+# the same ReadWriteOnce PVC at once - Recreate kills the old Pod first, avoiding that.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: url-shortener
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          # Same POSTGRES_DB/USER/PASSWORD convention as docker-compose.yml - Postgres's own
+          # image reads these to create the initial database on first startup. envFrom pulls
+          # every key in the Secret in as an env var; the names just happen to already match
+          # what Postgres expects (DB_NAME/DB_USER/DB_PASSWORD don't - see below).
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: url-shortener-db
+                  key: DB_NAME
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: url-shortener-db
+                  key: DB_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: url-shortener-db
+                  key: DB_PASSWORD
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: postgres-data
+---
+# ClusterIP (the default type): only reachable from inside the cluster, same intent as
+# postgres not being on docker-compose.yml's "public" network - the app can reach it via
+# this Service's DNS name ("postgres", from metadata.name below), nothing external can.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: url-shortener
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
