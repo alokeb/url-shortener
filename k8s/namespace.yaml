@@ -1,0 +1,7 @@
+# A separate namespace just isolates this app's resources by name/listing/RBAC scope from
+# the "monitoring" namespace (Prometheus/Grafana) - it's not a network boundary by itself
+# (that's what NetworkPolicy is for, same as the public/internal split in docker-compose.yml).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: url-shortener
