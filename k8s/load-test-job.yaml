@@ -1,0 +1,97 @@
+# ConfigMap holding the load-generator script as a mounted file, rather than baking a custom
+# image just for this - same "reuse the generic image, mount the logic in" trick as the
+# monitoring stack needed zero custom images. Reuses UrlShortenerServiceStressTest's spirit
+# (concurrent workers, a mix of unique writes + repeated reads so both Postgres and the Redis
+# cache get exercised) but as real HTTP traffic against the running Deployment, since that's
+# what actually generates the CPU load the HPA (hpa.yaml) reacts to - the Testcontainers test
+# calls the service layer in-process against ephemeral throwaway infra, which proves
+# correctness but produces no load against anything the HPA can see.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: load-test-script
+  namespace: url-shortener
+data:
+  load-test.sh: |
+    #!/bin/sh
+    set -eu
+
+    BASE_URL="${BASE_URL:-http://url-shortener-app:8080}"
+    DURATION_SECONDS="${DURATION_SECONDS:-300}"
+    CONCURRENCY="${CONCURRENCY:-40}"
+
+    end=$(( $(date +%s) + DURATION_SECONDS ))
+
+    worker() {
+      worker_id="$1"
+      request_num=0
+      while [ "$(date +%s)" -lt "$end" ]; do
+        request_num=$((request_num + 1))
+        # Every URL is unique per worker+request, so every POST is a real Postgres write
+        # (never a dedupe hit) - deliberate, to keep write-path load steady for the whole
+        # run. The 3 repeat GETs right after are what exercise the Redis cache-hit path.
+        url="https://loadtest.example/worker-$worker_id/req-$request_num"
+        short_code=$(curl -s -X POST "$BASE_URL/api/urls" \
+          -H "Content-Type: application/json" \
+          -d "{\"url\": \"$url\"}" \
+          | sed -n 's/.*"shortCode":"\([^"]*\)".*/\1/p')
+        if [ -n "$short_code" ]; then
+          curl -s -o /dev/null "$BASE_URL/$short_code"
+          curl -s -o /dev/null "$BASE_URL/$short_code"
+          curl -s -o /dev/null "$BASE_URL/$short_code"
+        fi
+      done
+      echo "worker $worker_id done: $request_num requests"
+    }
+
+    worker_num=1
+    while [ "$worker_num" -le "$CONCURRENCY" ]; do
+      worker "$worker_num" &
+      worker_num=$((worker_num + 1))
+    done
+    wait
+    echo "Load test complete."
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load-test
+  namespace: url-shortener
+spec:
+  # A failed one-shot load test should just be looked at, not silently auto-retried into a
+  # confusing pile of partial runs - backoffLimit: 0 makes that explicit.
+  backoffLimit: 0
+  # parallelism spins up this many independent Job Pods running the same script at once,
+  # instead of cranking CONCURRENCY even higher within a single Pod. Each `curl` invocation
+  # forks a whole new process, so past a point the load generator's own single Pod becomes
+  # the bottleneck (competing with itself for its one CPU limit) before the app under test
+  # does - spreading workers across multiple Pods puts more real host cores behind the
+  # traffic generation itself, matching what the host-stress-test goal actually needs.
+  parallelism: 8
+  completions: 8
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: load-test
+          image: curlimages/curl:8.11.0
+          command: ["sh", "/scripts/load-test.sh"]
+          env:
+            - name: DURATION_SECONDS
+              value: "600"
+            - name: CONCURRENCY
+              value: "40"
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+          resources:
+            requests:
+              cpu: 200m
+              memory: 100Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: script
+          configMap:
+            name: load-test-script
