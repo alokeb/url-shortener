@@ -1,0 +1,30 @@
+# HorizontalPodAutoscaler: a controller that watches this Deployment's Pods' real CPU usage
+# (read from metrics-server - the addon we enabled specifically for this) and edits
+# app.yaml's `replicas:` field for us, within the min/max bounds below. This is the actual
+# autoscaling piece everything else in this session was building toward.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: url-shortener-app
+  namespace: url-shortener
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: url-shortener-app
+  minReplicas: 1
+  # Raised for the host-stress-test phase: this app's memory footprint is mostly fixed JVM
+  # overhead per Pod rather than driven by traffic volume (see app.yaml's resources comment),
+  # so meaningfully moving host-level memory usage means allowing enough replicas for their
+  # combined fixed overhead to actually add up - 30 * ~300-400Mi real usage lands in the
+  # multi-GB range, which a maxReplicas of 5 could never reach regardless of load.
+  maxReplicas: 30
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # Against app.yaml's 250m CPU request, this means "scale up once average usage
+          # across Pods passes 125m".
+          averageUtilization: 50
