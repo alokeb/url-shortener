@@ -23,7 +23,7 @@
 - Terraform's default app memory sizing (`app_memory_limit`, shrunk to fit the ~1GB "without monitoring" minimum system requirement) was initially set to 256Mi - confirmed by testing this is actually broken: the app's real resting JVM footprint (~300-400Mi, established earlier this session) exceeds that, causing GC pressure severe enough that liveness-probe HTTP responses started timing out, which made kubelet kill and restart the container in a loop. Fixed by raising the default to 450Mi. That ~1GB minimum is still genuinely tight with Postgres+Redis+app all running (expected, not a bug). `enable_monitoring` defaults to `true` regardless of target (Terraform variable defaults can't reference another variable, so it can't auto-switch based on `deployment_target`) - must be set to `false` by hand in `terraform.tfvars` on a machine only sized to the smaller minimum, since kube-prometheus-stack alone needs 2GB+.
 
 ## Developer background
-- Experienced with Java and Maven (returning after ~10 years away)
+- Backend engineer, later moved into management; returning to hands-on coding after years away
 - New to: VS Code, Docker, Kubernetes
 - Prefers being walked through concepts, not just given commands
 
