@@ -122,14 +122,25 @@ resource "kubernetes_config_map" "loadtest_trigger_scripts" {
 
       # socat's SYSTEM: address wires the accepted connection to this script's stdin/stdout -
       # the request line (e.g. "GET /trigger?min=2&max=10 HTTP/1.1") is the first thing on
-      # stdin. Headers/body after it are never read; the OS discards them once this script
-      # exits and socat closes the connection, which is fine since nothing here needs them.
+      # stdin.
       read -r request_line
       path_and_query=$(printf '%s' "$request_line" | awk '{print $2}')
       query=""
       case "$path_and_query" in
         *\?*) query="$${path_and_query#*\?}" ;;
       esac
+
+      # Drain the rest of the request (headers, up to the blank CRLF line that ends them)
+      # before writing any response - if the OS still has unread bytes sitting in this
+      # connection's receive buffer when the script exits and socat closes it, it sends a TCP
+      # RST instead of a clean FIN. `curl` tolerates that fine (which is why manual curl
+      # testing looked like it worked perfectly), but a real browser's fetch() treats a RST as
+      # a hard network error and fails the request silently - exactly what was happening to
+      # the dashboard's button click.
+      while IFS= read -r line; do
+        line=$${line%$(printf '\r')}
+        [ -z "$line" ] && break
+      done
 
       get_param() {
         printf '%s\n' "$query" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n1
@@ -142,25 +153,41 @@ resource "kubernetes_config_map" "loadtest_trigger_scripts" {
         esac
       }
 
-      MIN_RAW=$(get_param min)
-      MAX_RAW=$(get_param max)
+      # One endpoint, toggling on whether the Job currently has any active pods - this is the
+      # server-side half of the same state the Overview dashboard's button queries
+      # (kube_job_status_active) to decide whether to show "Run" or "Stop", so a click always
+      # does the opposite of whatever's currently true. `|| true` + the case normalization
+      # below both handle "no such Job" (never started, or already deleted) as "0 active".
+      ACTIVE=$(kubectl get job load-test -n url-shortener -o jsonpath='{.status.active}' 2>/dev/null || true)
+      case "$ACTIVE" in
+        ''|*[!0-9]*) ACTIVE=0 ;;
+      esac
 
-      if is_positive_int "$MIN_RAW" && [ "$MIN_RAW" -ge 1 ]; then MIN="$MIN_RAW"; else MIN=1; fi
-      if is_positive_int "$MAX_RAW" && [ "$MAX_RAW" -ge 1 ]; then MAX="$MAX_RAW"; else MAX=3; fi
+      if [ "$ACTIVE" -gt 0 ]; then
+        LOG=$(kubectl delete job load-test -n url-shortener --ignore-not-found 2>&1)
+        BODY="Load test stopped.
 
-      # 30 matches the ceiling this project already tested up to (see k8s/hpa.yaml's
-      # host-stress-test history) - a sanity cap, not a hard Kubernetes limit. min is never
-      # allowed above max, so a mistyped value can't wedge the HPA in an impossible state.
-      [ "$MAX" -gt 30 ] && MAX=30
-      [ "$MIN" -gt "$MAX" ] && MIN="$MAX"
+      $LOG"
+      else
+        MIN_RAW=$(get_param min)
+        MAX_RAW=$(get_param max)
 
-      # One load-generator Job pod (40 concurrent curl workers each, see load-test-script's
-      # CONCURRENCY) roughly per target replica - a simple heuristic, not an exact CPU model,
-      # but enough sustained aggregate load that the HPA has a real reason to scale all the
-      # way to MAX instead of plateauing well below it.
-      PARALLELISM="$MAX"
+        if is_positive_int "$MIN_RAW" && [ "$MIN_RAW" -ge 1 ]; then MIN="$MIN_RAW"; else MIN=1; fi
+        if is_positive_int "$MAX_RAW" && [ "$MAX_RAW" -ge 1 ]; then MAX="$MAX_RAW"; else MAX=3; fi
 
-      JOB_YAML="apiVersion: batch/v1
+        # 30 matches the ceiling this project already tested up to (see k8s/hpa.yaml's
+        # host-stress-test history) - a sanity cap, not a hard Kubernetes limit. min is never
+        # allowed above max, so a mistyped value can't wedge the HPA in an impossible state.
+        [ "$MAX" -gt 30 ] && MAX=30
+        [ "$MIN" -gt "$MAX" ] && MIN="$MAX"
+
+        # One load-generator Job pod (40 concurrent curl workers each, see load-test-script's
+        # CONCURRENCY) roughly per target replica - a simple heuristic, not an exact CPU
+        # model, but enough sustained aggregate load that the HPA has a real reason to scale
+        # all the way to MAX instead of plateauing well below it.
+        PARALLELISM="$MAX"
+
+        JOB_YAML="apiVersion: batch/v1
       kind: Job
       metadata:
         name: load-test
@@ -196,17 +223,19 @@ resource "kubernetes_config_map" "loadtest_trigger_scripts" {
                 configMap:
                   name: load-test-script"
 
-      LOG=$(
-        kubectl patch hpa url-shortener-app -n url-shortener --type=merge \
-          -p "{\"spec\":{\"minReplicas\":$MIN,\"maxReplicas\":$MAX}}" 2>&1
-        kubectl delete job load-test -n url-shortener --ignore-not-found 2>&1
-        printf '%s\n' "$JOB_YAML" | kubectl apply -n url-shortener -f - 2>&1
-      )
+        LOG=$(
+          kubectl patch hpa url-shortener-app -n url-shortener --type=merge \
+            -p "{\"spec\":{\"minReplicas\":$MIN,\"maxReplicas\":$MAX}}" 2>&1
+          kubectl delete job load-test -n url-shortener --ignore-not-found 2>&1
+          printf '%s\n' "$JOB_YAML" | kubectl apply -n url-shortener -f - 2>&1
+        )
 
-      BODY="Load test triggered: HPA set to min=$MIN max=$MAX, load generator scaled to $PARALLELISM Job pod(s).
+        BODY="Load test triggered: HPA set to min=$MIN max=$MAX, load generator scaled to $PARALLELISM Job pod(s).
 
       $LOG"
-      printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: %s\r\n\r\n%s' "$${#BODY}" "$BODY"
+      fi
+
+      printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: %s\r\n\r\n%s' "$${#BODY}" "$BODY"
     EOF
   }
 }

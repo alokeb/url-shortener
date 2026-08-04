@@ -107,29 +107,36 @@ data:
         },
         {
           "id": 3,
-          "title": "▶ Run Stress Test",
-          "description": "Opens a request to the load-test trigger service in a new tab, which live-patches the HPA to the Min/Max replicas set above, then (re)creates the load-test Job scaled to match (more target replicas = more load-generator Job pods, so there's enough aggregate load to actually justify scaling that high). Watch the Replicas panel below to see the HPA react.",
+          "title": "Run / Stop Stress Test",
+          "description": "Opens a request to the load-test trigger service in a new tab (Grafana's fetch-without-navigating Action feature was tried and didn't actually fire on this panel type/version - see INCIDENTS.md), which toggles: idle -> live-patches the HPA to the Min/Max replicas set above and (re)creates the load-test Job scaled to match (more target replicas = more load-generator Job pods, so there's enough aggregate load to actually justify scaling that high); running -> stops it. Same URL both ways - the trigger service checks the Job's own current state server-side. Color/label here and the panel below reflect that same state.",
           "type": "stat",
-          "gridPos": { "x": 16, "y": 0, "w": 8, "h": 7 },
+          "gridPos": { "x": 16, "y": 0, "w": 8, "h": 5 },
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
           "targets": [
             {
               "refId": "A",
               "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-              "expr": "vector(1)",
-              "legendFormat": "run"
+              "expr": "kube_job_status_active{namespace=\"url-shortener\", job_name=\"load-test\"} or on() vector(0)",
+              "legendFormat": "active",
+              "instant": true
             }
           ],
           "fieldConfig": {
             "defaults": {
               "unit": "none",
               "mappings": [
-                { "type": "value", "options": { "1": { "text": "Click to trigger" } } }
+                {
+                  "type": "range",
+                  "options": { "from": 0, "to": 0, "result": { "text": "▶ Run Stress Test", "color": "blue" } }
+                },
+                {
+                  "type": "range",
+                  "options": { "from": 1, "to": 999999, "result": { "text": "■ Stop Stress Test", "color": "red" } }
+                }
               ],
-              "color": { "mode": "fixed", "fixedColor": "blue" },
               "links": [
                 {
-                  "title": "Run stress test",
+                  "title": "Run/stop stress test",
                   "url": "/trigger?min=${min_replicas}&max=${max_replicas}",
                   "targetBlank": true
                 }
@@ -137,7 +144,29 @@ data:
             },
             "overrides": []
           },
-          "options": { "textMode": "name", "colorMode": "background" }
+          "options": { "textMode": "value", "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } }
+        },
+        {
+          "id": 7,
+          "title": "Load Test: Active Pods",
+          "description": "Live count of currently-running load-generator pods for the Job the button above controls - 0 when idle.",
+          "type": "stat",
+          "gridPos": { "x": 16, "y": 5, "w": 8, "h": 2 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "kube_job_status_active{namespace=\"url-shortener\", job_name=\"load-test\"} or on() vector(0)",
+              "legendFormat": "active pods",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "short", "decimals": 0 },
+            "overrides": []
+          },
+          "options": { "textMode": "value_and_name", "colorMode": "value" }
         },
         {
           "id": 4,

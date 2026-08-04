@@ -32,6 +32,16 @@ resource "helm_release" "monitoring" {
             enabled  = true
             org_role = "Admin"
           }
+          # /tmp/dashboards is where the chart's dashboard-sidecar (grafana-sc-dashboard
+          # container, confirmed via its FOLDER env var) actually writes ConfigMap-provisioned
+          # dashboards inside the Grafana pod's filesystem - this has to be a real in-pod file
+          # path, not a dashboard UID/URL. Only takes effect on Grafana startup (this is a
+          # grafana.ini setting, not something the running instance re-reads), which a Helm
+          # values change naturally causes; see kubernetes_config_map.dashboard_overview above
+          # for the ConfigMap this file comes from.
+          dashboards = {
+            default_home_dashboard_path = "/tmp/dashboards/url-shortener-overview.json"
+          }
         }
       }
     })

@@ -294,4 +294,7 @@ Two dashboards, auto-provisioned into Grafana via a labeled ConfigMap pair (`k8s
 
 ## Roadmap
 
+- Further refine the Grafana dashboard — specifically, the stress-test button still opens a new tab instead of firing in place; Grafana's Actions feature was investigated in depth (see `INCIDENTS.md`) but never confirmed working on a Stat panel in this Grafana version, so it fell back to the known-working data link. Worth revisiting either against a newer Grafana release, or by rebuilding the button as a Canvas panel (the one panel type Actions were unambiguously built for), or by just configuring it through Grafana's own panel editor UI directly and exporting the resulting JSON, rather than more blind reverse-engineering.
+- A search field on the tester page (or the API) to look up a URL/short code and report whether the last resolution was a cache hit or a Postgres hit — makes the Redis-caching story (the whole reason this project has a cache layer at all) visible and interactive rather than only demonstrated via load testing and Grafana panels.
+- CI (GitHub Actions) running `mvn test -Dtest=UrlShortenerServiceStressTest` and `terraform validate`/`fmt -check` on every push — right now nothing verifies any of this automatically; every check in this project (including everything in `INCIDENTS.md`) has been run by hand.
 - Additional Terraform cloud targets beyond AWS (the K8s-facing resources are already cloud-agnostic — see `terraform/aws.tf`'s comments for the pattern to follow)
