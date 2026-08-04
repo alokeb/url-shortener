@@ -14,6 +14,8 @@ If you're newer to coding and curious what working with an AI agent on something
 
 ⭐ If this is useful to you as a learning example, a star helps other people find it too.
 
+**Development approach:** every commit in this repository was written in close collaboration with [Claude](https://claude.com) (Anthropic's AI), acting as a pairing partner on architecture, implementation, debugging, and infrastructure decisions throughout. That collaboration used to be recorded per-commit via a `Co-Authored-By` trailer; it's now disclosed here instead, once for the whole project, so it's easier to read as a narrative and doesn't crowd out the commit log.
+
 ## What it does
 
 Given a long URL, it generates a short code (or reuses the one it already gave that URL — shortened URLs are permalinks) and redirects to the original URL when that code is visited.
