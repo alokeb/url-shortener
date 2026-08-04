@@ -75,3 +75,44 @@ resource "kubectl_manifest" "app_service_monitor" {
     }
   })
 }
+
+# The chart's bundled Grafana runs a sidecar that auto-loads any ConfigMap labeled
+# grafana_dashboard = "1" in its own namespace as a dashboard - no Helm values change needed,
+# just the label. These two resources read the SAME JSON files as k8s/dashboards-configmap.yaml
+# via file() rather than hand-translating the JSON into HCL like everywhere else in terraform/ -
+# a deliberate deviation for this one case, since hand-duplicating a large generated JSON blob
+# across two files is a sync hazard this project's usual "translate by hand" pattern doesn't
+# have to worry about elsewhere (small, human-written YAML).
+resource "kubernetes_config_map" "dashboard_overview" {
+  count      = var.enable_monitoring ? 1 : 0
+  depends_on = [helm_release.monitoring]
+
+  metadata {
+    name      = "url-shortener-dashboard-overview"
+    namespace = "monitoring"
+    labels = {
+      grafana_dashboard = "1"
+    }
+  }
+
+  data = {
+    "url-shortener-overview.json" = file("${path.module}/../k8s/dashboards/url-shortener-overview.json")
+  }
+}
+
+resource "kubernetes_config_map" "dashboard_detail" {
+  count      = var.enable_monitoring ? 1 : 0
+  depends_on = [helm_release.monitoring]
+
+  metadata {
+    name      = "url-shortener-dashboard-detail"
+    namespace = "monitoring"
+    labels = {
+      grafana_dashboard = "1"
+    }
+  }
+
+  data = {
+    "url-shortener-detail.json" = file("${path.module}/../k8s/dashboards/url-shortener-detail.json")
+  }
+}

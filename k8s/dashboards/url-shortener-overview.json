@@ -1,0 +1,217 @@
+{
+  "uid": "url-shortener-overview",
+  "title": "URL Shortener - Overview",
+  "tags": ["url-shortener"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1,
+        "regex": ""
+      },
+      {
+        "name": "min_replicas",
+        "label": "Min replicas",
+        "type": "textbox",
+        "query": "1",
+        "current": { "text": "1", "value": "1" },
+        "hide": 0
+      },
+      {
+        "name": "max_replicas",
+        "label": "Max replicas",
+        "type": "textbox",
+        "query": "3",
+        "current": { "text": "3", "value": "3" },
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Cache Hit Ratio",
+      "type": "gauge",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(rate(cache_gets_total{cache=\"shortUrls\", result=\"hit\"}[5m])) / sum(rate(cache_gets_total{cache=\"shortUrls\", result=~\"hit|miss\"}[5m]))",
+          "legendFormat": "hit ratio"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.5 },
+              { "color": "green", "value": 0.8 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Current Replicas",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "kube_deployment_status_replicas{namespace=\"url-shortener\", deployment=\"url-shortener-app\"}",
+          "legendFormat": "replicas"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "decimals": 0 },
+        "overrides": []
+      },
+      "options": { "graphMode": "area", "colorMode": "value" }
+    },
+    {
+      "id": 3,
+      "title": "▶ Run Stress Test",
+      "description": "Opens a request to the load-test trigger service in a new tab, which live-patches the HPA to the Min/Max replicas set above, then (re)creates the load-test Job scaled to match (more target replicas = more load-generator Job pods, so there's enough aggregate load to actually justify scaling that high). Watch the Replicas panel below to see the HPA react.",
+      "type": "stat",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "vector(1)",
+          "legendFormat": "run"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            { "type": "value", "options": { "1": { "text": "Click to trigger" } } }
+          ],
+          "color": { "mode": "fixed", "fixedColor": "blue" },
+          "links": [
+            {
+              "title": "Run stress test",
+              "url": "/trigger?min=${min_replicas}&max=${max_replicas}",
+              "targetBlank": true
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": { "textMode": "name", "colorMode": "background" }
+    },
+    {
+      "id": 4,
+      "title": "Replica Count (HPA scale up/down)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 7, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "kube_deployment_status_replicas{namespace=\"url-shortener\", deployment=\"url-shortener-app\"}",
+          "legendFormat": "actual replicas"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "kube_horizontalpodautoscaler_status_desired_replicas{namespace=\"url-shortener\", horizontalpodautoscaler=\"url-shortener-app\"}",
+          "legendFormat": "HPA desired replicas"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "decimals": 0 },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "Request Rate by Endpoint",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 7, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(rate(http_server_requests_seconds_count{namespace=\"url-shortener\", uri!=\"/actuator/prometheus\"}[1m])) by (uri)",
+          "legendFormat": "{{uri}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "Pods (click a pod to drill down)",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "kube_pod_info{namespace=\"url-shortener\", pod=~\"url-shortener-app-.*\"}",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": { "pod": true, "node": true, "created_by_name": true },
+            "indexByName": {},
+            "excludeByName": {}
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "pod" },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Drill into ${__value.text}",
+                    "url": "/d/url-shortener-detail/url-shortener-pod-detail?var-pod=${__value.text}",
+                    "targetBlank": false
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

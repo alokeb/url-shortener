@@ -28,8 +28,8 @@ What started as a local Docker Compose app has grown into a full Kubernetes depl
 - PostgreSQL — persistent storage, the source of truth
 - Redis — caches short-code lookups so repeated redirects don't hit Postgres every time
 - Docker / Docker Compose — local build/run/orchestration
-- Kubernetes — Deployments, Services, a HorizontalPodAutoscaler, all in `k8s/`
-- Helm — installs the monitoring stack (Prometheus + Grafana + Alertmanager)
+- Kubernetes — Deployments, Services, a HorizontalPodAutoscaler, a Traefik Ingress, all in `k8s/`
+- Helm — installs the monitoring stack (Prometheus + Grafana + Alertmanager) and, on minikube, Traefik itself
 - Terraform — one-command deploy of everything above, to either a local minikube cluster or an AWS EC2 instance running k3s
 - Testcontainers — spins up real, throwaway Postgres/Redis containers for the test suite
 
@@ -61,8 +61,9 @@ docker-compose.yml   # app + postgres + redis, local dev only (see below)
 requests.http          # REST Client (VS Code) requests for shorten + redirect
 test-requests.sh        # zero-dependency curl script exercising the same flow
 
-k8s/                 # plain kubectl manifests - namespace, Secret, Postgres, Redis, app,
-│                     # HPA, ServiceMonitor, and a load-test Job for exercising autoscaling
+k8s/                 # plain kubectl manifests - namespace, Secret, Postgres, Redis, app, HPA,
+│                     # ServiceMonitor, a load-test Job, a Grafana dashboard ConfigMap pair,
+│                     # the load-test trigger service, and the Traefik Ingress
 └── ...
 
 terraform/            # deploys everything in k8s/ (plus the Helm monitoring stack) with
@@ -121,12 +122,23 @@ minikube addons enable metrics-server
 docker build -t url-shortener-app:latest .
 minikube image load url-shortener-app:latest
 kubectl apply -f k8s/namespace.yaml -f k8s/secret.yaml -f k8s/postgres.yaml \
-  -f k8s/redis.yaml -f k8s/app.yaml -f k8s/hpa.yaml -f k8s/servicemonitor.yaml
+  -f k8s/redis.yaml -f k8s/app.yaml -f k8s/hpa.yaml -f k8s/servicemonitor.yaml \
+  -f k8s/loadtest-trigger.yaml
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo add traefik https://traefik.github.io/charts
 helm repo update
 helm install monitoring prometheus-community/kube-prometheus-stack \
   -n monitoring --create-namespace
+kubectl apply -f k8s/dashboards-configmap.yaml
+# minikube has no built-in Traefik addon (unlike its nginx one) - see k8s/ingress.yaml's
+# comment for why Traefik specifically, and why the port numbers below.
+helm install traefik traefik/traefik -n kube-system \
+  --set ingressClass.enabled=true --set ingressClass.name=traefik \
+  --set service.type=NodePort --set ports.web.nodePort=30080 --set ports.websecure.nodePort=30443
+kubectl apply -f k8s/ingress.yaml
 ```
+
+Note: `k8s/loadtest-trigger.yaml` depends on the `load-test-script` ConfigMap that `k8s/load-test-job.yaml` creates (see Autoscaling below) - applying that file at least once, by hand or via the trigger button, is needed before the trigger actually works. The Terraform path doesn't have this gap (`terraform/loadtest_trigger.tf` applies that ConfigMap unconditionally, up front).
 
 **Or via Terraform** (see "Terraform" below for the full explanation) — from `terraform/`:
 ```bash
@@ -171,7 +183,32 @@ Terraform's provider configuration (the `kubernetes`/`helm`/`kubectl` blocks) ha
 
 After that first cluster exists, subsequent `terraform apply` runs (e.g. after a code change) only need the single, normal command — the two-phase dance is only needed when the cluster itself doesn't exist yet.
 
+### Ingress: accessing without port-forward
+
+An Ingress (`k8s/ingress.yaml` / `terraform/ingress.tf`) routes both the app and Grafana by hostname, so neither needs its own `kubectl port-forward` running. It targets Traefik specifically (not the more common ingress-nginx) because k3s — the AWS path's cluster — already ships Traefik built in; writing against it means the same Ingress objects work unmodified on both deployment targets. minikube has no equivalent built-in Traefik, so the local path installs it via Helm (`terraform/bootstrap.tf`'s `helm_release.traefik`, or the manual `helm install traefik ...` step above for the by-hand path).
+
+One-time step either way: point both hostnames at the right IP. Terraform can't portably edit `/etc/hosts` for you (OS-specific, needs elevated permissions), so this stays manual:
+
+```bash
+# Local (minikube):
+echo "$(minikube ip) app.url-shortener.local grafana.url-shortener.local" | sudo tee -a /etc/hosts
+
+# AWS (see "terraform output" for the instance's public IP):
+echo "<EC2 instance public IP> app.url-shortener.local grafana.url-shortener.local" | sudo tee -a /etc/hosts
+```
+
+Then:
+
+| | Local (minikube) | AWS |
+|---|---|---|
+| App / tester page | `http://app.url-shortener.local:30080/tester.html` | `http://app.url-shortener.local/tester.html` |
+| Grafana | `http://grafana.url-shortener.local:30080` | `http://grafana.url-shortener.local` |
+
+The port difference is a real infrastructure difference, not an inconsistency: k3s's built-in ServiceLB binds Traefik straight to the node's port 80/443 (designed for exactly this bare-node case, no cloud load balancer needed), while the Helm-installed Traefik on minikube uses a NodePort instead of a LoadBalancer Service, since minikube's Docker driver never assigns a LoadBalancer Service a real external IP without a separate, permanently-running `minikube tunnel` process.
+
 ### Accessing things once deployed (either Kubernetes path)
+
+The Ingress above is the primary way to reach things now. `kubectl port-forward` still works as a fallback (e.g. if you haven't set up the `/etc/hosts` entries, or Ingress isn't deployed):
 
 ```bash
 kubectl port-forward -n url-shortener svc/url-shortener-app 8080:8080   # app: http://localhost:8080
@@ -237,17 +274,24 @@ docker run --rm \
 
 ## Autoscaling
 
-The HPA (`k8s/hpa.yaml`) scales the app Deployment on CPU utilization. `k8s/load-test-job.yaml` generates real HTTP load (a mix of unique-URL writes and repeated cache-hit reads, run as parallel in-cluster Job Pods) to actually trigger it:
+The HPA (`k8s/hpa.yaml`) scales the app Deployment on CPU utilization. `k8s/load-test-job.yaml` generates real HTTP load (a mix of unique-URL writes and repeated cache-hit reads, run as parallel in-cluster Job Pods) to actually trigger it - either directly:
 
 ```bash
 kubectl apply -f k8s/load-test-job.yaml
 kubectl get hpa -n url-shortener -w   # watch REPLICAS climb in real time
 ```
 
-Delete the Job (`kubectl delete job load-test -n url-shortener`) to stop the load; the HPA scales back down on its own after a few minutes (a deliberate stabilization delay, to avoid flapping on brief spikes).
+or with a click, from the "▶ Run Stress Test" panel on the Grafana Overview dashboard (see below). The Overview dashboard's **Min replicas** / **Max replicas** variables (top of the dashboard) control what the button actually does, not just labels: clicking it hits a small in-cluster trigger service (`k8s/loadtest-trigger.yaml`) that live-patches the HPA to those bounds (`kubectl patch hpa`) and scales the load-test Job's `parallelism`/`completions` to roughly match Max replicas — one load-generator Job pod per target replica, a simple heuristic for "enough aggregate load that the HPA has an actual reason to scale that high," not an exact CPU model. The trigger service is narrowly RBAC-scoped to only create/delete/get/list Jobs in the `url-shortener` namespace; it has no other permissions.
+
+Delete the Job (`kubectl delete job load-test -n url-shortener`) to stop the load; the HPA scales back down on its own after a few minutes (a deliberate stabilization delay, to avoid flapping on brief spikes). A later `terraform apply` resets the HPA back to `app_min_replicas`/`app_max_replicas` (`terraform/variables.tf`) — the dashboard's live patch is meant for poking at it interactively, not a permanent config change.
+
+## Grafana Dashboards
+
+Two dashboards, auto-provisioned into Grafana via a labeled ConfigMap pair (`k8s/dashboards-configmap.yaml` / `terraform/monitoring.tf` - no manual "import" step) - no more ad-hoc PromQL against the bundled dashboards:
+
+- **URL Shortener - Overview**: cache hit ratio, replica count over time (overlaid with the HPA's desired-replica count, so scale-up/scale-down events are visible directly), request rate by endpoint, the stress-test trigger button above, and a pod table.
+- **URL Shortener - Pod Detail**: per-pod CPU, memory, request rate, and restart count, templated on a `$pod` variable. Click any row in the Overview dashboard's pod table to drill into that pod's detail view.
 
 ## Roadmap
 
-- Ingress, so the app doesn't need `kubectl port-forward` to reach it
-- A custom Grafana dashboard for this app specifically (replica count, request rate, cache hit ratio in one place), rather than ad-hoc PromQL queries against the bundled dashboards
 - Additional Terraform cloud targets beyond AWS (the K8s-facing resources are already cloud-agnostic — see `terraform/aws.tf`'s comments for the pattern to follow)

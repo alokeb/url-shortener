@@ -1,0 +1,78 @@
+# Targets the "traefik" IngressClass on purpose, not ingress-nginx: k3s (the AWS path, aws.tf)
+# ships Traefik as its own built-in ingress controller out of the box, so writing these
+# manifests against Traefik means the exact same Ingress objects work unmodified on both
+# deployment targets. minikube has no equivalent built-in Traefik addon (only an nginx one),
+# so the local path installs Traefik itself via Helm - see terraform/bootstrap.tf's
+# helm_release.traefik, or for the plain-kubectl "by hand" path:
+#   helm repo add traefik https://traefik.github.io/charts && helm repo update
+#   helm install traefik traefik/traefik -n kube-system \
+#     --set ingressClass.enabled=true --set ingressClass.name=traefik \
+#     --set service.type=NodePort --set ports.web.nodePort=30080 --set ports.websecure.nodePort=30443
+#
+# Port numbers differ by target because of this same local-vs-k3s difference: k3s's built-in
+# ServiceLB binds Traefik straight to the node's port 80/443 (no cloud load balancer needed -
+# it's designed for exactly this bare-node case), so AWS access is plain `http://host/...`.
+# minikube's Docker driver has no such mechanism for a plain Helm-installed LoadBalancer
+# Service (would need an extra always-running `minikube tunnel` process), so the local Helm
+# install instead uses a NodePort - access there is `http://host:30080/...`. See README's
+# Ingress section for both.
+#
+# This is split into TWO Ingress objects, in two different namespaces, even though it's one
+# logical routing table - an Ingress can only point at Services in its OWN namespace, and
+# Grafana's Service (monitoring-grafana, in the "monitoring" namespace) lives in a different
+# namespace than the app and loadtest-trigger Services (both in "url-shortener"). Traefik
+# merges rules for the same host from Ingress objects across every namespace into one routing
+# table, so this still behaves as a single `grafana.url-shortener.local` host - the trigger
+# service's more specific `/trigger` path takes precedence over the other Ingress's `/` root
+# rule regardless of which object it's declared in, since Traefik sorts by path specificity,
+# not by which Ingress object a rule came from.
+#
+# One-time manual step (Terraform can't portably edit /etc/hosts): point both hostnames below
+# at `minikube ip` (local) or the EC2 instance's public IP (AWS) - see README's Ingress section.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: url-shortener-app
+  namespace: url-shortener
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: app.url-shortener.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: url-shortener-app
+                port:
+                  number: 8080
+    - host: grafana.url-shortener.local
+      http:
+        paths:
+          - path: /trigger
+            pathType: Prefix
+            backend:
+              service:
+                name: loadtest-trigger
+                port:
+                  number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: url-shortener-grafana
+  namespace: monitoring
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: grafana.url-shortener.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: monitoring-grafana
+                port:
+                  number: 80

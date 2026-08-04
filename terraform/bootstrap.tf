@@ -48,6 +48,57 @@ resource "null_resource" "metrics_server" {
   }
 }
 
+# ingress.tf's Ingress objects target the "traefik" IngressClass on purpose, not minikube's
+# own bundled ingress-nginx addon - k3s (aws.tf) ships Traefik as its OWN built-in ingress
+# controller already, so writing against Traefik means the same Ingress objects work
+# unmodified on both deployment targets (see ingress.tf's comment). minikube has no
+# equivalent built-in Traefik addon, so it's installed here via Helm instead - same pattern as
+# helm_release.monitoring in monitoring.tf, just a different chart. Only needed on the local
+# path; nothing to do here for "aws" since k3s already has Traefik running before this
+# Terraform config ever touches the cluster.
+resource "helm_release" "traefik" {
+  count      = var.deployment_target == "local" ? 1 : 0
+  depends_on = [null_resource.minikube_cluster]
+
+  name             = "traefik"
+  repository       = "https://traefik.github.io/charts"
+  chart            = "traefik"
+  namespace        = "kube-system"
+  create_namespace = false
+
+  # service.type=NodePort (not the chart's default LoadBalancer) because minikube's Docker
+  # driver never assigns LoadBalancer Services a real external IP unless a separate
+  # `minikube tunnel` process is kept running the whole time - a NodePort needs nothing extra
+  # running, at the cost of an explicit port number in the URL (see README's Ingress
+  # section). AWS's k3s handles this differently (and better) via its own built-in ServiceLB,
+  # which is exactly why this whole resource only exists for deployment_target = "local".
+  values = [
+    yamlencode({
+      ingressClass = {
+        enabled = true
+        name    = "traefik"
+      }
+      # service.type lives at service.spec.type in this chart (confirmed via `helm show
+      # values traefik/traefik`), not the top-level service.type a lot of other charts use -
+      # that mismatch is why the first attempt at this deployed a LoadBalancer Service anyway
+      # despite this override (silently ignored, not an error - see INCIDENTS.md).
+      service = {
+        spec = {
+          type = "NodePort"
+        }
+      }
+      ports = {
+        web = {
+          nodePort = 30080
+        }
+        websecure = {
+          nodePort = 30443
+        }
+      }
+    })
+  ]
+}
+
 # Rebuilds the app image only when the actual inputs to that image change - not on every
 # `terraform apply`. sha256() over a concatenation of every source file's own hash means ANY
 # change under src/, or to the Dockerfile/pom.xml themselves, produces a different trigger

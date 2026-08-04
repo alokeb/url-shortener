@@ -1,0 +1,205 @@
+# A tiny in-cluster HTTP endpoint that (re)creates the load-test Job below on any incoming
+# request - what the Overview Grafana dashboard's "Run Stress Test" panel links to, so the
+# stress test can be kicked off with a click instead of a separate `kubectl apply`. Runs as
+# its own narrowly-scoped ServiceAccount (Role, below) that can only create/delete/get/list
+# Jobs in this one namespace - it has no other permissions in the cluster at all.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loadtest-trigger
+  namespace: url-shortener
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loadtest-trigger
+  namespace: url-shortener
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "delete", "get", "list"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loadtest-trigger
+  namespace: url-shortener
+subjects:
+  - kind: ServiceAccount
+    name: loadtest-trigger
+    namespace: url-shortener
+roleRef:
+  kind: Role
+  name: loadtest-trigger
+  apiGroup: rbac.authorization.k8s.io
+---
+# Same "reuse a generic image, mount the logic in" trick as load-test-job.yaml's own script
+# ConfigMap - no custom image built/maintained just for this. trigger.sh both live-patches the
+# HPA to the min/max replicas requested (query params on the request, set by the Overview
+# dashboard's Min/Max replica variables - see k8s/dashboards/url-shortener-overview.json) and
+# (re)creates the load-test Job scaled to match, so there's enough aggregate load to actually
+# justify scaling that high (Job names/specs are immutable once created, so a completed
+# previous run has to be deleted before a new one can start). Reuses the load-test-script
+# ConfigMap (from k8s/load-test-job.yaml, applied once, unchanged, alongside this file - see
+# terraform/loadtest_trigger.tf's comment on why Terraform applies it up front) for the actual
+# curl-loop logic; only the Job's own parallelism/completions are generated here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loadtest-trigger-scripts
+  namespace: url-shortener
+data:
+  trigger.sh: |
+    #!/bin/sh
+    set -eu
+
+    # socat's SYSTEM: address wires the accepted connection to this script's stdin/stdout -
+    # the request line (e.g. "GET /trigger?min=2&max=10 HTTP/1.1") is the first thing on
+    # stdin. Headers/body after it are never read; the OS discards them once this script
+    # exits and socat closes the connection, which is fine since nothing here needs them.
+    read -r request_line
+    path_and_query=$(printf '%s' "$request_line" | awk '{print $2}')
+    query=""
+    case "$path_and_query" in
+      *\?*) query="${path_and_query#*\?}" ;;
+    esac
+
+    get_param() {
+      printf '%s\n' "$query" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n1
+    }
+
+    is_positive_int() {
+      case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+      esac
+    }
+
+    MIN_RAW=$(get_param min)
+    MAX_RAW=$(get_param max)
+
+    if is_positive_int "$MIN_RAW" && [ "$MIN_RAW" -ge 1 ]; then MIN="$MIN_RAW"; else MIN=1; fi
+    if is_positive_int "$MAX_RAW" && [ "$MAX_RAW" -ge 1 ]; then MAX="$MAX_RAW"; else MAX=3; fi
+
+    # 30 matches the ceiling this project already tested up to (see k8s/hpa.yaml's
+    # host-stress-test history) - a sanity cap, not a hard Kubernetes limit. min is never
+    # allowed above max, so a mistyped value can't wedge the HPA in an impossible state.
+    [ "$MAX" -gt 30 ] && MAX=30
+    [ "$MIN" -gt "$MAX" ] && MIN="$MAX"
+
+    # One load-generator Job pod (40 concurrent curl workers each, see load-test-script's
+    # CONCURRENCY) roughly per target replica - a simple heuristic, not an exact CPU model,
+    # but enough sustained aggregate load that the HPA has a real reason to scale all the way
+    # to MAX instead of plateauing well below it.
+    PARALLELISM="$MAX"
+
+    JOB_YAML="apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: load-test
+      namespace: url-shortener
+    spec:
+      backoffLimit: 0
+      parallelism: $PARALLELISM
+      completions: $PARALLELISM
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: load-test
+              image: curlimages/curl:8.11.0
+              command: [\"sh\", \"/scripts/load-test.sh\"]
+              env:
+                - name: DURATION_SECONDS
+                  value: \"600\"
+                - name: CONCURRENCY
+                  value: \"40\"
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+              resources:
+                requests:
+                  cpu: 200m
+                  memory: 100Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+          volumes:
+            - name: script
+              configMap:
+                name: load-test-script"
+
+    LOG=$(
+      kubectl patch hpa url-shortener-app -n url-shortener --type=merge \
+        -p "{\"spec\":{\"minReplicas\":$MIN,\"maxReplicas\":$MAX}}" 2>&1
+      kubectl delete job load-test -n url-shortener --ignore-not-found 2>&1
+      printf '%s\n' "$JOB_YAML" | kubectl apply -n url-shortener -f - 2>&1
+    )
+
+    BODY="Load test triggered: HPA set to min=$MIN max=$MAX, load generator scaled to $PARALLELISM Job pod(s).
+
+    $LOG"
+    printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: %s\r\n\r\n%s' "${#BODY}" "$BODY"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadtest-trigger
+  namespace: url-shortener
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loadtest-trigger
+  template:
+    metadata:
+      labels:
+        app: loadtest-trigger
+    spec:
+      serviceAccountName: loadtest-trigger
+      containers:
+        # alpine/k8s already bundles kubectl (pre-configured for in-cluster auth via the
+        # mounted ServiceAccount token, standard kubectl behavior - no extra setup needed);
+        # socat isn't in the image by default, so it's installed at container start rather
+        # than via a custom Dockerfile, matching this project's "no bespoke images" pattern
+        # elsewhere. socat's SYSTEM: address forks the given command for every inbound
+        # connection with the socket wired to its stdin/stdout - the simplest way to turn a
+        # plain shell script into an HTTP listener without an actual HTTP server/framework.
+        - name: trigger
+          image: alpine/k8s:1.31.1
+          command:
+            - sh
+            - -c
+            - apk add --no-cache socat >/tmp/apk.log 2>&1 && exec socat TCP-LISTEN:8080,fork,reuseaddr SYSTEM:"sh /scripts/trigger.sh"
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      volumes:
+        - name: scripts
+          configMap:
+            name: loadtest-trigger-scripts
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loadtest-trigger
+  namespace: url-shortener
+spec:
+  selector:
+    app: loadtest-trigger
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
