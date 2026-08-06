@@ -34,6 +34,9 @@ build/
 
 ### Claude Code ###
 .claude/
+# Session-to-session context notes for whoever's driving Claude Code here - personal
+# scratch state, not something meant to be shared/versioned.
+memory.md
 
 ### Terraform ###
 # .terraform.lock.hcl is deliberately NOT ignored - that one's meant to be committed (it
