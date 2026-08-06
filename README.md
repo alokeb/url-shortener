@@ -6,15 +6,30 @@
 ![Kubernetes](https://img.shields.io/badge/Kubernetes-ready-326CE5?logo=kubernetes&logoColor=white)
 ![Terraform](https://img.shields.io/badge/Terraform-IaC-844FBA?logo=terraform&logoColor=white)
 
-A URL shortening service — and, more importantly, a real example of what "vibe coding" (building real software by working with an AI coding agent) actually looks like past the first five minutes.
+**This isn't a product, a portfolio piece, or something I'm asking you to use.** It's a URL shortener that exists to answer one question: *what does it actually look like to learn backend development by building something real, with an AI agent as a pairing partner instead of a chatbot you paste code into?*
 
-Most AI-pair-programming demos stop at a toy CRUD app. This one didn't: it started the same way — a Spring Boot service, Postgres, Redis — and then kept going the way a real project does. Containerizing it. Deploying it to Kubernetes. Wiring up autoscaling and a Prometheus/Grafana monitoring stack. Actually stress-testing it. Automating the whole deployment with Terraform. Every step — including the mistakes (a race condition that crash-looped a pod, a monitoring config that was silently ignored, a memory limit that turned out to be too small) — is in the commit history and in [`CLAUDE.md`](CLAUDE.md), not cleaned up after the fact. Each of those mistakes is also written up as a compact decision record — trigger, rejected fix, tested remedy, and why — in [`INCIDENTS.md`](INCIDENTS.md).
+A little about why: I was a backend engineer, then moved into engineering management for long enough that I stopped writing real code day to day. Docker, Kubernetes, Terraform, a proper monitoring stack — none of that was "here's a refresher," it was genuinely new to me going in. This project is me testing, on myself, whether "build something real with an AI agent, then keep extending it" is actually a working way back into hands-on engineering — not a claim I'm making from the outside, an experiment I ran on myself, with the failures left in.
 
-If you're newer to coding and curious what working with an AI agent on something real actually involves — not a one-shot snippet, but an evolving codebase with real infrastructure decisions — this repo is meant to be read, not just run. Clone it, open the commit history, see how one small project grew.
+If you've asked ChatGPT or Claude "teach me backend development" and gotten a study plan that goes stale after a few days — that's the wrong use of the tool, and this repo is the alternative: don't ask an AI to *teach* you backend development, ask it to help you *build* something, then keep giving that thing more capabilities until you've accidentally learned backend development along the way.
 
-⭐ If this is useful to you as a learning example, a star helps other people find it too.
+That's literally the whole method here:
 
-**Development approach:** every commit in this repository was written in close collaboration with [Claude](https://claude.com) (Anthropic's AI), acting as a pairing partner on architecture, implementation, debugging, and infrastructure decisions throughout. That collaboration used to be recorded per-commit via a `Co-Authored-By` trailer; it's now disclosed here instead, once for the whole project, so it's easier to read as a narrative and doesn't crowd out the commit log.
+1. **Pick a real problem, build the dumbest version that solves it.** This started as: take a long URL, give back a short one, redirect when visited. A Spring Boot service, Postgres, a redirect endpoint. Nothing clever.
+2. **Give it a capability it's missing, one at a time, because you actually need it — not because a curriculum says so.**
+   - Duplicate lookups were slow → added a Redis cache.
+   - Wanted it to survive a restart → Postgres instead of memory.
+   - Wanted more than one instance → containerized it, then put it on Kubernetes.
+   - Wanted to know if it was actually healthy → Prometheus and Grafana.
+   - Wanted proof the autoscaling was real → wrote a load generator and watched replicas climb live on a dashboard.
+
+   Every one of those was "huh, I wonder if I could—" not step 4 of a syllabus.
+3. **Do the work with an AI agent, don't outsource the thinking to one.** Every commit here was written in collaboration with [Claude](https://claude.com) — but "collaboration" meant debugging real crash loops, reading actual error messages, verifying claims against a live cluster instead of trusting that code compiled = code worked. Every step — including the mistakes (a race condition that crash-looped a pod, a monitoring config that was silently ignored, a memory limit that turned out to be too small) — is in the commit history and in [`CLAUDE.md`](CLAUDE.md), not cleaned up after the fact. Each of those mistakes is also written up as a compact decision record — trigger, rejected fix, tested remedy, and why — in [`INCIDENTS.md`](INCIDENTS.md).
+
+To the "software development is boring, don't bother" comments in that thread: fair, if your version of "learning backend development" is a CRUD tutorial you never deploy. It stops being boring the moment something you built breaks in a way you don't understand yet and you have to find out why — a pod that crash-loops because Kubernetes has no idea Postgres needs to start first, a Helm chart that silently ignores half your config because you guessed a field name wrong, a metric that should exist and doesn't. That's not busywork, that's the actual job, and it's genuinely fun in a way "watch a video, copy the code" never is.
+
+Clone it. Read the commit history. Steal the approach for whatever you're actually curious about — it doesn't have to be a URL shortener.
+
+<sub>⭐ If this is useful to you as a learning example, a star helps other people find it too.</sub>
 
 ## What it does
 
