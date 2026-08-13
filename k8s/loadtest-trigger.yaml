@@ -98,11 +98,67 @@ data:
       ''|*[!0-9]*) ACTIVE=0 ;;
     esac
 
+    # Both branches deliberately block until the change they made is visible in PROMETHEUS -
+    # not merely accepted by the API server. That's what keeps the Overview dashboard's button
+    # spinner up for the whole wait: Grafana's Canvas button shows a spinner from click until
+    # the HTTP response lands (its loading state is wired to the fetch lifecycle, with no way
+    # to bind it to query data), and the button's own label is driven by a Prometheus query -
+    # so returning any earlier than this just trades a spinner for a stale label. Waiting on
+    # the Job via kubectl alone isn't enough for the same reason: kubectl sees the change
+    # immediately, Prometheus only on its next scrape of kube-state-metrics.
+    #
+    # Each wait is separately bounded (first arg = max seconds) and non-fatal on timeout, so a
+    # wedged cluster degrades to "answers anyway, label catches up late" rather than hanging.
+    # The two limits are kept low enough that even back-to-back worst cases stay under the
+    # browser/Grafana fetch timeout.
+    wait_for() {
+      limit=$1
+      shift
+      i=0
+      while [ "$i" -lt "$limit" ]; do
+        "$@" && return 0
+        sleep 1
+        i=$((i + 1))
+      done
+      return 1
+    }
+
+    job_active() {
+      a=$(kubectl get job load-test -n url-shortener -o jsonpath='{.status.active}' 2>/dev/null || true)
+      case "$a" in ''|*[!0-9]*) a=0 ;; esac
+      [ "$a" -gt 0 ]
+    }
+
+    job_gone() {
+      ! kubectl get job load-test -n url-shortener >/dev/null 2>&1
+    }
+
+    # Exactly the query the dashboard button's own panel runs, so "Prometheus agrees" here
+    # means the label is about to render correctly. Cheap sed rather than a JSON parser: the
+    # `or on() vector(0)` guarantees exactly one result, so there's only ever one "value" pair.
+    PROM_URL="http://monitoring-kube-prometheus-prometheus.monitoring:9090/api/v1/query"
+    PROM_QUERY='kube_job_status_active{namespace="url-shortener",job_name="load-test"} or on() vector(0)'
+
+    prom_value() {
+      curl -sf -m 2 -G "$PROM_URL" --data-urlencode "query=$PROM_QUERY" 2>/dev/null \
+        | sed -n 's/.*"value":\[[^,]*,"\([0-9.]*\)"\].*/\1/p' | head -n1
+    }
+
+    prom_active() { v=$(prom_value); [ -n "$v" ] && [ "${v%%.*}" -gt 0 ]; }
+    prom_idle()   { v=$(prom_value); [ -n "$v" ] && [ "${v%%.*}" -eq 0 ]; }
+
+    # enable_monitoring=false is a supported configuration (see terraform/variables.tf), and
+    # there's no Prometheus to wait on in that case - skip rather than burn the full timeout.
+    prom_reachable() { [ -n "$(prom_value)" ]; }
+
     if [ "$ACTIVE" -gt 0 ]; then
       LOG=$(kubectl delete job load-test -n url-shortener --ignore-not-found 2>&1)
-      BODY="Load test stopped.
-
-    $LOG"
+      printf '%s\n' "$LOG" 1>&2
+      wait_for 15 job_gone || printf 'timed out waiting for job to disappear\n' 1>&2
+      if prom_reachable; then
+        wait_for 15 prom_idle || printf 'timed out waiting for Prometheus to report idle\n' 1>&2
+      fi
+      BODY="{\"status\":\"stopped\",\"message\":\"Load test stopped.\"}"
     else
       MIN_RAW=$(get_param min)
       MAX_RAW=$(get_param max)
@@ -165,12 +221,23 @@ data:
         printf '%s\n' "$JOB_YAML" | kubectl apply -n url-shortener -f - 2>&1
       )
 
-      BODY="Load test triggered: HPA set to min=$MIN max=$MAX, load generator scaled to $PARALLELISM Job pod(s).
-
-    $LOG"
+      printf '%s\n' "$LOG" 1>&2
+      wait_for 15 job_active || printf 'timed out waiting for load-test pods to start\n' 1>&2
+      if prom_reachable; then
+        wait_for 15 prom_active || printf 'timed out waiting for Prometheus to report active\n' 1>&2
+      fi
+      BODY="{\"status\":\"started\",\"minReplicas\":$MIN,\"maxReplicas\":$MAX,\"loadGeneratorPods\":$PARALLELISM,\"message\":\"Load test started: HPA min=$MIN max=$MAX, $PARALLELISM load-generator pod(s).\"}"
     fi
 
-    printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: %s\r\n\r\n%s' "${#BODY}" "$BODY"
+    # JSON, not text/plain, and deliberately so: the Overview dashboard's Canvas button calls
+    # this through Grafana's own backendSrv.fetch(), which parses every response body as JSON
+    # and surfaces a parse failure as a generic "An error has occurred" toast - a 200 with a
+    # human-readable sentence in it still counts as a failed call from the button's point of
+    # view (confirmed by reading Grafana's compiled canvas panel code; see INCIDENTS.md).
+    # kubectl's own output goes to stderr instead, which socat leaves attached to the
+    # container's logs rather than the client socket - so `kubectl logs deploy/loadtest-trigger`
+    # still shows exactly what was applied, without corrupting the JSON body.
+    printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: %s\r\n\r\n%s' "${#BODY}" "$BODY"
 ---
 apiVersion: apps/v1
 kind: Deployment

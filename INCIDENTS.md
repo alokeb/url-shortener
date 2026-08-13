@@ -182,8 +182,58 @@ fix already landed, and to the code comment where the reasoning is preserved lon
   (13.1.1) - strong evidence this specific Action mechanism is Canvas-panel-specific (or
   otherwise unsupported here) rather than a general Stat-panel capability, despite the field
   names existing generically in the bundle. A working new-tab click beats a broken same-tab
-  one; noted as an open roadmap item rather than pursued further blind.
+  one; noted as an open roadmap item rather than pursued further blind. **Superseded by #8** -
+  the Canvas rebuild did work, and the real causes turned out to be three unrelated bugs
+  stacked behind each other, none of them the Actions schema itself.
 - **Where:** [`k8s/dashboards/url-shortener-overview.json`](k8s/dashboards/url-shortener-overview.json) (button panel),
   [`k8s/loadtest-trigger.yaml`](k8s/loadtest-trigger.yaml) (`trigger.sh` drain + `Cache-Control`) — commit
   [`ca87bd0`](https://github.com/alokeb/url-shortener/commit/ca87bd0) *Add stress-test Run/Stop toggle, min/max replica
   controls, and Grafana home dashboard*.
+
+## 8. The stress-test button, actually fixed — three stacked causes
+
+Follow-up to #7, which ended with the button working but opening a new tab, and the root
+cause unproven. Rebuilding it as a Canvas panel exposed three *separate* failures in a row,
+each of which fully masked the next.
+
+- **Triggering signal:** Canvas panel's button element clicked, spinner appeared, then a red
+  "An error has occurred" toast. Nothing reached the cluster: no trigger-service logs, no Job.
+- **Rejected fix:** Continuing to chase Stat-panel Actions (#7's dead end). Reading the
+  lazy-loaded `canvasPanel` chunk out of the running Grafana settled it: Canvas's button
+  element is the only place Grafana wires an HTTP call directly to a click, via
+  `config.api = {endpoint, method, data, contentType, queryParams, headerParams}`. Its
+  endpoint IS template-interpolated (`Rn(t.endpoint)` where `Rn` is
+  `getTemplateSrv().replace`) and relative `/`-paths ARE supported (`Gf` sanitizes and
+  absolutizes them) - so `${min_replicas}` and a relative endpoint were both fine, and neither
+  was the problem.
+- **Tested remedy:** Three independent bugs, each found only after fixing the one in front of
+  it, and each verified against the running cluster rather than assumed:
+  1. **Response was `text/plain`.** Canvas calls through Grafana's own `backendSrv.fetch()`,
+     which parses every response body as JSON - so a `200 OK` carrying a human-readable
+     sentence still counts as a failed call. Changed the trigger to return JSON, with
+     kubectl's own output redirected to stderr so it still lands in `kubectl logs` without
+     corrupting the body.
+  2. **`root_url` was never set,** so it defaulted to `http://localhost:3000/`. Grafana
+     resolves relative API endpoints against `root_url`, *not* the browser's origin - so the
+     click fired at `http://localhost:3000/trigger`, where nothing listens, and failed as a
+     cross-origin/NetworkError. This one is genuinely invisible from the server side: the
+     request never left the browser. Set `root_url` to the real Ingress URL, computed per
+     `deployment_target` (`:30080` on minikube's NodePort, `:80` on k3s's ServiceLB).
+  3. **The label lagged ~40s behind the click** once it did work. Grafana's Canvas spinner is
+     bound to the fetch lifecycle with no way to tie it to query data, so a fast "accepted!"
+     reply just traded a spinner for a stale label. Made the trigger block until *Prometheus*
+     reports the new value (not merely until the API server accepts it), which puts the real
+     wait inside the request the spinner is already tracking, and dropped the
+     kube-state-metrics scrape from the chart's 30s default to 1s. Click-to-updated-label went
+     from ~40s to ~3s (measured: 2.3s round-trip, 1s dashboard refresh).
+- **Why accepted:** Each fix is the documented mechanism rather than a workaround - a JSON API
+  returning JSON, `root_url` set to the URL Grafana is actually served on (which its own docs
+  call for behind a reverse proxy), and a synchronous endpoint that doesn't claim done before
+  it is. The 1s scrape is the one deliberate tradeoff: it's ~30x the samples for that target,
+  affordable only because this is a small short-lived local cluster, and left at the 30s
+  default for everything else. The broader lesson matches #7's: every one of these was
+  invisible from the server side, and the browser's own console/network view was the only
+  thing that could distinguish "request failed" from "request never sent."
+- **Where:** [`k8s/dashboards/url-shortener-overview.json`](k8s/dashboards/url-shortener-overview.json) (Canvas panel),
+  [`k8s/loadtest-trigger.yaml`](k8s/loadtest-trigger.yaml) (JSON response + Prometheus wait),
+  [`terraform/monitoring.tf`](terraform/monitoring.tf) (`root_url`, scrape interval).

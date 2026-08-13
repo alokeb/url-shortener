@@ -5,7 +5,7 @@
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "10s",
+  "refresh": "1s",
   "time": { "from": "now-30m", "to": "now" },
   "templating": {
     "list": [
@@ -92,8 +92,8 @@
     {
       "id": 3,
       "title": "Run / Stop Stress Test",
-      "description": "Opens a request to the load-test trigger service in a new tab (Grafana's fetch-without-navigating Action feature was tried and didn't actually fire on this panel type/version - see INCIDENTS.md), which toggles: idle -> live-patches the HPA to the Min/Max replicas set above and (re)creates the load-test Job scaled to match (more target replicas = more load-generator Job pods, so there's enough aggregate load to actually justify scaling that high); running -> stops it. Same URL both ways - the trigger service checks the Job's own current state server-side. Color/label here and the panel below reflect that same state.",
-      "type": "stat",
+      "description": "A Canvas panel, not a Stat panel, specifically so the click fires an in-place fetch instead of navigating: Canvas's button element is the one place Grafana wires an HTTP call (config.api) directly to a click. Toggles on the same server-side state the label reads - idle -> live-patches the HPA to the Min/Max replicas set above and (re)creates the load-test Job scaled to match; running -> stops it. Same URL both ways; the trigger service checks the Job's own active-pod count and does the opposite of whatever is currently true.",
+      "type": "canvas",
       "gridPos": { "x": 16, "y": 0, "w": 8, "h": 5 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
@@ -101,7 +101,7 @@
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
           "expr": "kube_job_status_active{namespace=\"url-shortener\", job_name=\"load-test\"} or on() vector(0)",
-          "legendFormat": "active",
+          "format": "table",
           "instant": true
         }
       ],
@@ -111,24 +111,54 @@
           "mappings": [
             {
               "type": "range",
-              "options": { "from": 0, "to": 0, "result": { "text": "▶ Run Stress Test", "color": "blue" } }
+              "options": { "from": 0, "to": 0, "result": { "text": "▶ Run Stress Test", "color": "blue", "index": 0 } }
             },
             {
               "type": "range",
-              "options": { "from": 1, "to": 999999, "result": { "text": "■ Stop Stress Test", "color": "red" } }
-            }
-          ],
-          "links": [
-            {
-              "title": "Run/stop stress test",
-              "url": "/trigger?min=${min_replicas}&max=${max_replicas}",
-              "targetBlank": true
+              "options": { "from": 1, "to": 999999, "result": { "text": "■ Stop Stress Test", "color": "red", "index": 1 } }
             }
           ]
         },
         "overrides": []
       },
-      "options": { "textMode": "value", "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } }
+      "options": {
+        "inlineEditing": false,
+        "showAdvancedTypes": true,
+        "panZoom": false,
+        "infinitePan": false,
+        "root": {
+          "type": "frame",
+          "name": "Element 1",
+          "constraint": { "horizontal": "left", "vertical": "top" },
+          "placement": { "top": 0, "left": 0, "width": 100, "height": 100, "rotation": 0 },
+          "background": { "color": { "fixed": "transparent" } },
+          "border": { "color": { "fixed": "transparent" } },
+          "elements": [
+            {
+              "type": "button",
+              "name": "StressTestButton",
+              "config": {
+                "text": { "mode": "field", "field": "Value", "fixed": "" },
+                "style": { "variant": "primary" },
+                "api": {
+                  "endpoint": "/trigger?min=${min_replicas}&max=${max_replicas}",
+                  "method": "GET",
+                  "data": "{}",
+                  "contentType": "application/json",
+                  "queryParams": [],
+                  "headerParams": [],
+                  "successMessage": "Stress test toggled"
+                }
+              },
+              "background": { "color": { "field": "Value" } },
+              "border": { "color": { "fixed": "transparent" } },
+              "constraint": { "horizontal": "left", "vertical": "top" },
+              "placement": { "top": 12, "left": 12, "width": 260, "height": 56, "rotation": 0 },
+              "links": []
+            }
+          ]
+        }
+      }
     },
     {
       "id": 7,

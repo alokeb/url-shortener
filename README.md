@@ -142,14 +142,25 @@ kubectl apply -f k8s/namespace.yaml -f k8s/secret.yaml -f k8s/postgres.yaml \
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo add traefik https://traefik.github.io/charts
 helm repo update
+# root_url must match how you actually reach Grafana, not its in-pod address: the Overview
+# dashboard's stress-test button calls a relative endpoint, and Grafana resolves those
+# against root_url rather than the browser's origin - leave it at the localhost:3000 default
+# and the button fires into the void. The 1s kube-state-metrics scrape is what makes the
+# button's label flip quickly (see Autoscaling below); 30s is the chart default.
 helm install monitoring prometheus-community/kube-prometheus-stack \
-  -n monitoring --create-namespace
+  -n monitoring --create-namespace \
+  --set 'grafana.grafana\.ini.server.root_url=http://grafana.url-shortener.local:30080/' \
+  --set 'grafana.grafana\.ini.dashboards.min_refresh_interval=1s' \
+  --set 'kube-state-metrics.prometheus.monitor.interval=1s' \
+  --set 'kube-state-metrics.prometheus.monitor.scrapeTimeout=1s'
 kubectl apply -f k8s/dashboards-configmap.yaml
 # minikube has no built-in Traefik addon (unlike its nginx one) - see k8s/ingress.yaml's
-# comment for why Traefik specifically, and why the port numbers below.
+# comment for why Traefik specifically, and why the port numbers below. Note service.spec.type,
+# NOT service.type - this chart nests Service overrides a level deeper than most, and the
+# wrong key is silently ignored rather than rejected (see INCIDENTS.md).
 helm install traefik traefik/traefik -n kube-system \
   --set ingressClass.enabled=true --set ingressClass.name=traefik \
-  --set service.type=NodePort --set ports.web.nodePort=30080 --set ports.websecure.nodePort=30443
+  --set service.spec.type=NodePort --set ports.web.nodePort=30080 --set ports.websecure.nodePort=30443
 kubectl apply -f k8s/ingress.yaml
 ```
 
@@ -296,9 +307,23 @@ kubectl apply -f k8s/load-test-job.yaml
 kubectl get hpa -n url-shortener -w   # watch REPLICAS climb in real time
 ```
 
-or with a click, from the "▶ Run Stress Test" panel on the Grafana Overview dashboard (see below, and note the known new-tab quirk in Roadmap). The Overview dashboard's **Min replicas** / **Max replicas** variables (top of the dashboard) control what the button actually does, not just labels: clicking it hits a small in-cluster trigger service (`k8s/loadtest-trigger.yaml`) that live-patches the HPA to those bounds (`kubectl patch hpa`) and scales the load-test Job's `parallelism`/`completions` to roughly match Max replicas — one load-generator Job pod per target replica, a simple heuristic for "enough aggregate load that the HPA has an actual reason to scale that high," not an exact CPU model. The trigger service is narrowly RBAC-scoped to only create/delete/get/list Jobs in the `url-shortener` namespace; it has no other permissions.
+or with a click, from the **Run / Stop Stress Test** button on the Grafana Overview dashboard (see below). The Overview dashboard's **Min replicas** / **Max replicas** variables (top of the dashboard) control what the button actually does, not just labels: clicking it hits a small in-cluster trigger service (`k8s/loadtest-trigger.yaml`) that live-patches the HPA to those bounds (`kubectl patch hpa`) and scales the load-test Job's `parallelism`/`completions` to roughly match Max replicas — one load-generator Job pod per target replica, a simple heuristic for "enough aggregate load that the HPA has an actual reason to scale that high," not an exact CPU model. The trigger service is narrowly RBAC-scoped to Jobs and this one HPA in the `url-shortener` namespace; it has no other permissions.
 
-Delete the Job (`kubectl delete job load-test -n url-shortener`) to stop the load; the HPA scales back down on its own after a few minutes (a deliberate stabilization delay, to avoid flapping on brief spikes). A later `terraform apply` resets the HPA back to `app_min_replicas`/`app_max_replicas` (`terraform/variables.tf`) — the dashboard's live patch is meant for poking at it interactively, not a permanent config change.
+The same button stops the test — it's one endpoint that toggles on whatever the Job's current state actually is, so the label flips between "▶ Run Stress Test" and "■ Stop Stress Test" to match. Two details make that feel immediate rather than laggy, both documented in `INCIDENTS.md`: the trigger service blocks until *Prometheus* reports the change (not just until the API server accepts it), which keeps Grafana's own button spinner up for the real duration instead of flashing for a moment and then sitting on a stale label; and `kube-state-metrics` is scraped every 1s rather than the chart's 30s default, since that scrape is what the label reads. Click-to-updated-label lands around 3s.
+
+Delete the Job (`kubectl delete job load-test -n url-shortener`) to stop the load, or just click the button again. A later `terraform apply` resets the HPA back to `app_min_replicas`/`app_max_replicas` (`terraform/variables.tf`) — the dashboard's live patch is meant for poking at it interactively, not a permanent config change.
+
+### Why replicas don't drop the moment you hit Stop
+
+Expect roughly a **5-minute delay** before the replica count starts falling, even though CPU drops within seconds and the load-test Job is deleted immediately. That's Kubernetes working as designed, not the dashboard lagging: the HPA applies a *scale-down stabilization window* (`behavior.scaleDown.stabilizationWindowSeconds`, default **300s**) so that a brief dip in traffic can't cause it to tear down capacity it's about to need again. Scaling **up** has no such delay here — the defaults are deliberately asymmetric:
+
+```bash
+kubectl get hpa -n url-shortener url-shortener-app \
+  -o jsonpath='{range .status.conditions[*]}{.type}={.status} ({.reason}){"\n"}{end}'
+# AbleToScale=True (ScaleDownStabilized)   <- this is the HPA holding, on purpose
+```
+
+`ScaleDownStabilized` is the HPA telling you exactly that. If you want a demo that comes back down promptly, set `behavior.scaleDown.stabilizationWindowSeconds` to something like `30` in `k8s/hpa.yaml` (and the Terraform mirror) — but that's a demo-oriented choice, not a general recommendation: under real traffic a short window makes the Deployment flap on every brief lull, which is the exact thing the 300s default exists to prevent.
 
 ## Grafana Dashboards
 
@@ -309,7 +334,6 @@ Two dashboards, auto-provisioned into Grafana via a labeled ConfigMap pair (`k8s
 
 ## Roadmap
 
-- Further refine the Grafana dashboard — specifically, the stress-test button still opens a new tab instead of firing in place; Grafana's Actions feature was investigated in depth (see `INCIDENTS.md`) but never confirmed working on a Stat panel in this Grafana version, so it fell back to the known-working data link. Worth revisiting either against a newer Grafana release, or by rebuilding the button as a Canvas panel (the one panel type Actions were unambiguously built for), or by just configuring it through Grafana's own panel editor UI directly and exporting the resulting JSON, rather than more blind reverse-engineering.
 - A search field on the tester page (or the API) to look up a URL/short code and report whether the last resolution was a cache hit or a Postgres hit — makes the Redis-caching story (the whole reason this project has a cache layer at all) visible and interactive rather than only demonstrated via load testing and Grafana panels.
 - CI (GitHub Actions) running `mvn test -Dtest=UrlShortenerServiceStressTest` and `terraform validate`/`fmt -check` on every push — right now nothing verifies any of this automatically; every check in this project (including everything in `INCIDENTS.md`) has been run by hand.
 - Additional Terraform cloud targets beyond AWS (the K8s-facing resources are already cloud-agnostic — see `terraform/aws.tf`'s comments for the pattern to follow)

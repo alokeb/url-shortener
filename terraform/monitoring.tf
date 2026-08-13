@@ -4,6 +4,15 @@
 # separate upgrade step. See variables.tf's enable_monitoring for why this is conditional
 # (doesn't fit the project's ~1GB "without monitoring" minimum system requirement).
 
+locals {
+  # Same hostname on both targets (the Ingress rule in ingress.tf is identical either way);
+  # only the port differs, for the reason documented in k8s/ingress.yaml - k3s's ServiceLB
+  # binds Traefik to the node's port 80, while the Helm-installed Traefik on minikube is a
+  # NodePort on 30080. Kept next to the helm_release that consumes it rather than in
+  # versions.tf, since nothing else needs it.
+  grafana_root_url = var.deployment_target == "aws" ? "http://grafana.url-shortener.local/" : "http://grafana.url-shortener.local:30080/"
+}
+
 resource "helm_release" "monitoring" {
   count = var.enable_monitoring ? 1 : 0
   depends_on = [
@@ -23,6 +32,27 @@ resource "helm_release" "monitoring" {
   # more direct exposure (NodePort/Ingress/public LoadBalancer).
   values = [
     yamlencode({
+      # The Overview dashboard's Run/Stop button reads its own label from
+      # kube_job_status_active, which comes from kube-state-metrics - and the trigger service
+      # deliberately blocks until Prometheus reports the new value (see
+      # loadtest_trigger.tf), so this interval directly sets how long the button's spinner
+      # stays up on every click. It otherwise inherits the chart's 30s global default.
+      #
+      # 1s is aggressive on purpose and is a local-demo tradeoff, not a general
+      # recommendation: kube-state-metrics exposes a series per object in the cluster, so this
+      # ingests ~30x the samples (and storage) the default would for this one target. It's
+      # affordable here because the cluster is tiny and short-lived, and it buys a button that
+      # reacts about as fast as the click. The global 30s is deliberately left alone for
+      # every other target. scrape_timeout must be <= scrape_interval or Prometheus rejects
+      # the config outright, and the ServiceMonitor would otherwise inherit the 10s global.
+      "kube-state-metrics" = {
+        prometheus = {
+          monitor = {
+            interval      = "1s"
+            scrapeTimeout = "1s"
+          }
+        }
+      }
       grafana = {
         "grafana.ini" = {
           auth = {
@@ -41,6 +71,25 @@ resource "helm_release" "monitoring" {
           # for the ConfigMap this file comes from.
           dashboards = {
             default_home_dashboard_path = "/tmp/dashboards/url-shortener-overview.json"
+            # Grafana clamps any dashboard's refresh to this floor (5s by default), so the
+            # Overview dashboard's 1s refresh would silently be ignored - leaving the
+            # dashboard as the slowest link now that kube-state-metrics is scraped every 1s.
+            # Same local-demo tradeoff as that scrape interval: every open dashboard now
+            # re-queries Prometheus once a second.
+            min_refresh_interval = "1s"
+          }
+          # Without this, root_url defaults to http://localhost:3000/ - which is correct for
+          # Grafana's own in-pod port but wrong for every way anyone actually reaches it here
+          # (through Traefik, on the Ingress hostname). That mismatch is not cosmetic: the
+          # Overview dashboard's Canvas button calls a RELATIVE endpoint ("/trigger"), and
+          # Grafana resolves relative API endpoints against root_url rather than against the
+          # browser's current origin - so with the default it fired at
+          # http://localhost:3000/trigger, where nothing is listening, and the click failed
+          # with a cross-origin/NetworkError instead of ever reaching the cluster (see
+          # INCIDENTS.md). Setting this correctly is also just what Grafana's own docs call
+          # for when it sits behind a reverse proxy, which it does here.
+          server = {
+            root_url = local.grafana_root_url
           }
         }
       }
