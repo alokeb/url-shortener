@@ -131,9 +131,18 @@ class UrlShortenerServiceStressTest {
 
         ExecutorService pool = Executors.newFixedThreadPool(threadPoolSize);
         try {
+            // Explicit lambda rather than the tidier `UrlMapping::getOriginalUrl` method
+            // reference on purpose - don't "simplify" it back. An unbound instance-method
+            // reference turns the receiver into the functional interface's parameter, and
+            // Eclipse JDT's null analysis (on via .vscode/settings.json's
+            // java.compile.nullAnalysis.mode, since Spring Boot 4.1 puts JSpecify annotations
+            // on the classpath) then wants that receiver to be provably @NonNull. UrlMapping
+            // carries no nullness annotations, so it flags an "unchecked conversion" warning.
+            // Nothing here can actually be null - Optional.map never passes null to its
+            // mapper - so this is purely about giving the analyzer a shape it can verify.
             List<Callable<String>> lookups = IntStream.range(0, concurrentRequests)
                     .<Callable<String>>mapToObj(i -> () -> service.resolve(shortCode)
-                            .map(UrlMapping::getOriginalUrl)
+                            .map(resolved -> resolved.getOriginalUrl())
                             .orElseThrow())
                     .toList();
 
@@ -246,6 +255,9 @@ class UrlShortenerServiceStressTest {
     }
 
     private static double averageMillis(List<Long> nanos) {
-        return nanos.stream().mapToLong(Long::longValue).average().orElseThrow() / 1_000_000.0;
+        // Explicit lambda instead of `Long::longValue` for the same reason as the method
+        // reference in concurrentResolvesOfTheSameCodeOnlyHitPostgresOnce() above - see the
+        // comment there.
+        return nanos.stream().mapToLong(nano -> nano.longValue()).average().orElseThrow() / 1_000_000.0;
     }
 }
