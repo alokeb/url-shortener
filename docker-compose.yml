@@ -8,6 +8,11 @@ services:
   app:
     build: .
     # host_port:container_port - makes the app reachable at localhost:8080 on your machine.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
     ports:
       - "8080:8080"
     # These become real environment variables INSIDE the app container, which is exactly
@@ -58,6 +63,11 @@ services:
     # Bound specifically to 127.0.0.1 (not just "5432:5432", which would bind 0.0.0.0 - every
     # network interface) so this is reachable from tools on THIS machine only (e.g. a
     # database-browsing VS Code extension), never from another machine on the network.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
     ports:
       - "127.0.0.1:5432:5432"
     # Deliberately NOT on the "public" network - nothing outside this compose stack can
@@ -67,6 +77,11 @@ services:
 
   redis:
     image: redis:7
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
     ports:
       - "127.0.0.1:6379:6379"
     networks:
